@@ -1,0 +1,31 @@
+name: Release
+
+# Pushing a tag vX.Y.Z builds the archive and creates a DRAFT release.
+# Nothing is published until the draft is reviewed and published by hand.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Tag matches the version in src/config.h
+        run: |
+          version=$(sed -n 's/^#define VERSION "\(.*\)"/\1/p' src/config.h)
+          test "v$version" = "$GITHUB_REF_NAME"
+      - name: Tests
+        run: make check
+      - name: Release archive
+        run: make dist
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --draft --title "rndis-tether ${GITHUB_REF_NAME#v}" \
+            --notes "Install or update: see README. Archive SHA-256: $(cut -d' ' -f1 dist/rndis-tether-macos.tar.gz.sha256)" \
+            dist/rndis-tether-macos.tar.gz dist/rndis-tether-macos.tar.gz.sha256

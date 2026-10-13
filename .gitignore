@@ -1,0 +1,9 @@
+/rndis-tether
+/rndis-tether-selftest
+/rndis-tether-controltest
+/rndis-tether-sessiontest
+/bpf-feth-test
+*.dSYM/
+.DS_Store
+/profile/
+/dist/

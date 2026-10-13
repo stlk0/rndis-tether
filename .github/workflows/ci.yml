@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Apple silicon and Intel runners; the daemon itself needs a phone, so CI covers
+        # the build, the offline tests and the static analyzer.
+        os: [macos-latest, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build
+        run: make
+      - name: Offline tests (UBSan + Guard Malloc)
+        run: make check
+      - name: Static analyzer (fails on any finding)
+        run: make analyze
+      - name: Release archive
+        run: make dist
+      - name: Command-line smoke test
+        run: |
+          ./rndis-tether version
+          ./rndis-tether help
+          ./rndis-tether config
+          ./rndis-tether status || test $? -eq 1
+
+  homebrew:
+    # The formula as published in stlk0/homebrew-tap, pointed at this checkout.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install, test and lint the formula
+        env:
+          HOMEBREW_NO_INSTALL_FROM_API: 1
+          HOMEBREW_NO_AUTO_UPDATE: 1
+        run: |
+          version=$(sed -n 's/^#define VERSION "\(.*\)"/\1/p' src/config.h)
+          archive="$RUNNER_TEMP/rndis-tether-$version.tar.gz"
+          git archive --prefix="rndis-tether-$version/" HEAD -o "$archive"
+          sum=$(shasum -a 256 "$archive" | cut -d' ' -f1)
+          brew tap-new --no-git local/ci
+          formula="$(brew --repository)/Library/Taps/local/homebrew-ci/Formula/rndis-tether.rb"
+          sed -e "s|^  url .*|  url \"file://$archive\"|" -e "s|^  sha256 .*|  sha256 \"$sum\"|" \
+            packaging/homebrew/rndis-tether.rb > "$formula"
+          brew install --build-from-source local/ci/rndis-tether
+          brew test local/ci/rndis-tether
+          brew style "$formula"
+          rndis-tether status || test $? -eq 1
