@@ -23,7 +23,7 @@ static bool parse_bool(const char *value, bool *out) {
     return false;
 }
 
-static bool valid_feth_name(const char *name) {
+bool config_interface_valid(const char *name) {
     size_t n = strlen(name);
     if (n < 5 || n >= IFNAMSIZ || strncmp(name, "feth", 4)) return false;
     for (size_t i = 4; i < n; ++i) if (!isdigit((unsigned char)name[i])) return false;
@@ -37,7 +37,7 @@ static bool set_bool(bool *flag, const char *name, const char *value, char *why,
 }
 
 static bool set_interface(char *interface, const char *name, const char *value, char *why, size_t why_size) {
-    if (valid_feth_name(value)) {
+    if (config_interface_valid(value)) {
         strlcpy(interface, value, IFNAMSIZ);
         return true;
     }
@@ -71,7 +71,7 @@ bool config_live(const char *name) {
     return !strcmp(name, "prefer-phone") || !strcmp(name, "verbose");
 }
 
-static bool config_check(const Config *c, char *why, size_t why_size) {
+bool config_check(const Config *c, char *why, size_t why_size) {
     if (strcmp(c->host, c->peer)) return true;
     snprintf(why, why_size, "host-interface and peer-interface must differ (both are %s)", c->host);
     return false;
@@ -82,6 +82,20 @@ static char *trim(char *s) {
     size_t n = strlen(s);
     while (n && isspace((unsigned char)s[n - 1])) s[--n] = 0;
     return s;
+}
+
+/* One line without its newline; false and problem when it is not a setting. */
+static bool parse_line(Config *c, char *line, char *problem, size_t problem_size) {
+    char *hash = strchr(line, '#');
+    if (hash) *hash = 0;
+    char *text = trim(line), *equals = strchr(text, '=');
+    if (!*text) return true;
+    if (!equals) {
+        strlcpy(problem, "expected \"name = value\"", problem_size);
+        return false;
+    }
+    *equals = 0;
+    return config_set(c, trim(text), trim(equals + 1), problem, problem_size);
 }
 
 bool config_load(Config *c, const char *path, char *why, size_t why_size) {
@@ -95,19 +109,25 @@ bool config_load(Config *c, const char *path, char *why, size_t why_size) {
     char line[512], problem[200];
     unsigned number = 0;
     bool ok = true;
-    while (fgets(line, sizeof line, f)) {
+    bool end = false;
+    while (!end && fgets(line, sizeof line, f)) {
         ++number;
-        char *hash = strchr(line, '#');
-        if (hash) *hash = 0;
-        char *text = trim(line), *equals = strchr(text, '=');
-        if (!*text) continue;
-        if (equals) {
-            *equals = 0;
-            if (config_set(c, trim(text), trim(equals + 1), problem, sizeof problem)) continue;
-        } else {
-            strlcpy(problem, "expected \"name = value\"", sizeof problem);
+        size_t length = strlen(line);
+        bool fits = true;
+        if (length == sizeof line - 1 && line[length - 1] != '\n') {
+            int next = getc(f);
+            fits = next == '\n' || next == EOF;
+            /* The rest of an overlong line is not a line of its own (a long comment). */
+            while (next != '\n' && next != EOF) next = getc(f);
+            end = next == EOF;
         }
+        if (!fits) strlcpy(problem, "line is too long", sizeof problem);
+        else if (parse_line(c, line, problem, sizeof problem)) continue;
         if (ok) snprintf(why, why_size, "%s line %u: %s", path, number, problem);
+        ok = false;
+    }
+    if (ferror(f) && ok) {
+        snprintf(why, why_size, "cannot read %s", path);
         ok = false;
     }
     fclose(f);
@@ -171,7 +191,8 @@ bool config_save(const Config *c, const char *path, char *why, size_t why_size) 
         "host-interface = %s\n"
         "peer-interface = %s\n",
         c->verbose ? "yes" : "no", c->host, c->peer);
-    bool written = !ferror(f);
+    /* On disk before the rename: a power cut must not leave an empty file behind. */
+    bool written = !ferror(f) && !fflush(f) && !fsync(fileno(f));
     if (fclose(f) || !written || chmod(temporary, 0644) || rename(temporary, path)) {
         snprintf(why, why_size, "cannot write %s: %s", path, strerror(errno));
         unlink(temporary);

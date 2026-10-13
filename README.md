@@ -43,7 +43,7 @@ brew install stlk0/tap/rndis-tether
 sudo rndis-tether install
 ```
 
-Either way, the installer ends with `rndis-tether 1.0.0 is installed` and the current
+Either way, the installer ends with `rndis-tether 1.0.1 is installed` and the current
 status. macOS may show a notification "Background Items Added": that is rndis-tether,
 leave it allowed.
 
@@ -146,7 +146,7 @@ Homebrew, then also run `brew uninstall rndis-tether`.
 - rndis-tether only passes your traffic between the phone and macOS. It sends nothing
   anywhere by itself: no telemetry, no update checks.
 - It runs as a system service (as root) because creating a network interface requires
-  that. The code is open: about 3,500 lines of C.
+  that. The code is open: about 4,500 lines of C.
 - The program is not yet signed with an Apple Developer ID. Both install options above
   avoid the macOS warning about that. If you download the archive from the Releases page
   in a browser instead, macOS blocks it until you allow it in
@@ -194,6 +194,7 @@ apps -> macOS TCP/IP -> feth50 (DHCP from the phone, via macOS's own ipconfig)
 | `/usr/local/bin/rndis-tether` | Link to the program, only when Homebrew did not install it |
 | `/var/run/rndis-tether.sock` | Status for `rndis-tether status`, while the service runs |
 | `/var/run/rndis-tether-admin.sock` | Settings changed by administrators, while the service runs |
+| `/var/db/rndis-tether` | Only root can enter it: the service's lock and the names of the interfaces it created |
 | `feth50`, `feth51` | Network interfaces, while a phone is connected |
 
 ### Commands
@@ -225,7 +226,8 @@ and start it again afterwards with `sudo rndis-tether install`.
 ### For other programs
 
 The service answers on two UNIX sockets, so another program (a menu bar app, a script)
-can show its state and change settings without `sudo`.
+can show its state and change settings without `sudo`. Both belong to root; a careful
+client checks that with `getpeereid()` after connecting, as `rndis-tether` itself does.
 
 **Status**, `/var/run/rndis-tether.sock`, readable by everyone. Connect and read until
 the service closes the connection: one `name=value` per line, the same as

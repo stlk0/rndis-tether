@@ -188,7 +188,6 @@ void datapath_send(Datapath *d, const uint8_t *frame, size_t n) {
     if (d->stopped || d->link_down || d->held) { ++d->stats.tx_dropped; return; }
     trace_frame("Mac->phone", &d->traced_tx, frame, n);
     if (n < ETH_HEADER || n > ETH_HEADER + d->limits.mtu + 4) { ++d->stats.tx_dropped; return; }
-    size_t limit = d->limits.max_transfer < TX_BUFFER - 1 ? d->limits.max_transfer : TX_BUFFER - 1;
     for (int attempt = 0; attempt < 2; ++attempt) {
         /* A failing flush can end the session or start RESET in the middle of a batch. */
         if (d->stopped || d->held) { ++d->stats.tx_dropped; return; }
@@ -199,7 +198,8 @@ void datapath_send(Datapath *d, const uint8_t *frame, size_t n) {
             d->filling->packets = 0;
         }
         TxSlot *slot = d->filling;
-        size_t added = rndis_append_packet(slot->buffer, slot->used, limit, frame, n, d->limits.alignment_shift);
+        size_t added = rndis_append_packet(slot->buffer, slot->used, d->tx_limit, frame, n,
+                                           d->limits.alignment_shift);
         if (added) {
             slot->used += added;
             slot->bytes += n;
@@ -249,6 +249,11 @@ const char *datapath_start(Datapath *d, UsbLink *u, int bpf, unsigned bpf_size, 
                            const DatapathEvents *events) {
     *d = (Datapath){.usb = u, .events = events, .limits = *limits, .link_down = limits->link_down, .bpf = bpf,
                     .bpf_size = bpf_size < BPF_BUFFER ? bpf_size : BPF_BUFFER};
+    /* A transfer of whole USB packets gets one zero byte (rndis_finish_transfer); that
+     * byte must fit the phone's MaxTransferSize as well as the buffer. */
+    size_t limit = limits->max_transfer < TX_BUFFER - 1 ? limits->max_transfer : TX_BUFFER - 1;
+    unsigned packet = u->out_packet_size ? u->out_packet_size : 512;
+    d->tx_limit = limit && !(limit % packet) ? limit - 1 : limit;
     d->bpf_batch = bpf_batch_write(bpf, true);
     for (unsigned i = 0; i < TX_SLOTS; ++i) {
         tx_slots[i].owner = d;

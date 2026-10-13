@@ -5,26 +5,27 @@ CFLAGS = -std=c11 -Wall -Wextra $(WERROR) -Wpedantic -mmacosx-version-min=13.0 -
 FRAMEWORKS = -framework IOKit -framework CoreFoundation -framework SystemConfiguration
 NETIF_FRAMEWORKS = -framework CoreFoundation -framework SystemConfiguration
 SOURCES = $(addprefix src/,main.c daemon.c session.c health.c control.c datapath.c status.c admin.c usb.c \
-          netif.c rndis.c cli.c config.c log.c clock.c)
+          netif.c runtime.c rndis.c cli.c config.c log.c clock.c)
 HEADERS = $(wildcard src/*.h)
 VERSION := $(shell sed -n 's/^\#define VERSION "\(.*\)"/\1/p' src/config.h)
 
-.PHONY: all check analyze dist clean
+.PHONY: all check asan analyze dist clean
 all: rndis-tether
 
 rndis-tether: $(SOURCES) $(HEADERS)
 	$(CC) $(CFLAGS) -O2 $(SOURCES) $(FRAMEWORKS) -o $@
 
-# AddressSanitizer from Command Line Tools clang 15 aborts at startup on macOS 26,
-# so out-of-bounds reads are caught by Guard Malloc instead: every allocation ends
-# exactly at an unmapped page (MALLOC_STRICT_SIZE), and the fuzzer copies each input
-# into an exact-size allocation. A second run puts the guard page in front instead.
+# check catches out-of-bounds reads with Guard Malloc, which works with every compiler
+# (AddressSanitizer from Command Line Tools clang 15 aborts at startup on macOS 26):
+# every allocation ends exactly at an unmapped page (MALLOC_STRICT_SIZE), and the fuzzer
+# copies each input into an exact-size allocation. A second run puts the guard page in
+# front instead. `make asan` runs the same tests under AddressSanitizer where it works.
 TEST_CFLAGS = $(CFLAGS) -Isrc -O1 -fno-omit-frame-pointer -fsanitize=undefined -fno-sanitize-recover=all
 GMALLOC = DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib MALLOC_STRICT_SIZE=1
 TESTS = rndis-tether-selftest rndis-tether-controltest rndis-tether-sessiontest
 
-# Pure parsers, the fuzzer, BPF records and the settings file.
-SELFTEST = tests/selftest.c $(addprefix src/,config.c log.c rndis.c netif.c)
+# Pure parsers, the fuzzer, BPF records, the settings file and the interface marker.
+SELFTEST = tests/selftest.c $(addprefix src/,config.c log.c rndis.c netif.c runtime.c)
 rndis-tether-selftest: $(SELFTEST) $(HEADERS)
 	$(CC) $(TEST_CFLAGS) $(SELFTEST) $(NETIF_FRAMEWORKS) -o $@
 
@@ -34,13 +35,22 @@ rndis-tether-controltest: $(CONTROLTEST) $(HEADERS)
 	$(CC) $(TEST_CFLAGS) $(CONTROLTEST) $(FRAMEWORKS) -o $@
 
 # Data path, health (KEEPALIVE, RESET) and status over a fake USB link and control channel;
-# the admin socket over a real one.
-SESSIONTEST = tests/sessiontest.c $(addprefix src/,datapath.c health.c status.c admin.c rndis.c netif.c log.c config.c)
+# both sockets over real ones.
+SESSIONTEST = tests/sessiontest.c $(addprefix src/,datapath.c health.c status.c admin.c runtime.c rndis.c netif.c \
+              log.c config.c)
 rndis-tether-sessiontest: $(SESSIONTEST) $(HEADERS)
 	$(CC) $(TEST_CFLAGS) $(SESSIONTEST) $(FRAMEWORKS) -o $@
 
 check: $(TESTS)
 	for t in $(TESTS); do $(GMALLOC) ./$$t && $(GMALLOC) MALLOC_PROTECT_BEFORE=1 ./$$t || exit 1; done
+
+ASAN_CFLAGS = $(TEST_CFLAGS) -fsanitize=address
+asan: $(SELFTEST) $(CONTROLTEST) $(SESSIONTEST) $(HEADERS)
+	mkdir -p asan
+	$(CC) $(ASAN_CFLAGS) $(SELFTEST) $(NETIF_FRAMEWORKS) -o asan/selftest
+	$(CC) $(ASAN_CFLAGS) $(CONTROLTEST) $(FRAMEWORKS) -o asan/controltest
+	$(CC) $(ASAN_CFLAGS) $(SESSIONTEST) $(FRAMEWORKS) -o asan/sessiontest
+	for t in selftest controltest sessiontest; do ./asan/$$t || exit 1; done
 
 # Diagnostic: creates feth60/feth61 and checks that BPF on the driver side sees
 # what macOS sends (needs root). Not part of the daemon.
@@ -64,4 +74,4 @@ dist: $(SOURCES) $(HEADERS)
 	@echo "dist/rndis-tether-macos.tar.gz: rndis-tether $(VERSION), $$(lipo -archs dist/pkg/rndis-tether)"
 
 clean:
-	rm -rf rndis-tether $(TESTS) bpf-feth-test dist *.dSYM *.plist
+	rm -rf rndis-tether $(TESTS) bpf-feth-test dist asan *.dSYM *.plist

@@ -22,6 +22,7 @@ bool run_command_quiet(const char *const argv[], unsigned timeout_ms);
 /* feth snapshots these sysctls at creation; non-default values corrupt frames. */
 bool feth_sysctls_ok(char *why, size_t why_size);
 bool interface_exists(const char *name);
+/* Undoes only its own steps when one fails: a name that is taken stays as it is. */
 bool feth_create_pair(const char *host, const char *peer, unsigned mtu);
 void feth_destroy(const char *name);
 

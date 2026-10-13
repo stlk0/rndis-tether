@@ -13,5 +13,8 @@ extern bool log_verbose;
 
 void logmsg(const char *format, ...) __attribute__((format(printf, 1, 2)));
 void logdebug(const char *format, ...) __attribute__((format(printf, 1, 2)));
+/* Text from a device, before it reaches logs, status lines or a terminal: every byte
+ * outside printable ASCII becomes '?'. */
+void printable(char *text);
 
 #endif

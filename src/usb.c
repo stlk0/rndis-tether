@@ -1,4 +1,5 @@
 #include "usb.h"
+#include "log.h"
 #include "rndis.h"
 
 #include <IOKit/IOCFPlugIn.h>
@@ -34,14 +35,10 @@ static CFMutableDictionaryRef create_interface_matching(const int32_t *values, u
     return d;
 }
 
-CFMutableDictionaryRef usb_create_rndis_matching(void) {
-    static const int32_t rndis[] = {RNDIS_CONTROL_CLASS, RNDIS_CONTROL_SUBCLASS, RNDIS_CONTROL_PROTOCOL};
-    return create_interface_matching(rndis, 3);
-}
-
-CFMutableDictionaryRef usb_create_cdc_rndis_matching(void) {
-    static const int32_t cdc[] = {0x02, 0x02, 0xff};
-    return create_interface_matching(cdc, 3);
+CFMutableDictionaryRef usb_create_matching(unsigned kind) {
+    static const int32_t rndis[] = {RNDIS_CONTROL_CLASS, RNDIS_CONTROL_SUBCLASS, RNDIS_CONTROL_PROTOCOL},
+                         cdc[] = {0x02, 0x02, 0xff};
+    return create_interface_matching(kind ? cdc : rndis, 3);
 }
 
 static bool property_u32(io_registry_entry_t entry, CFStringRef key, uint32_t *out) {
@@ -81,6 +78,7 @@ void usb_describe(io_service_t interface, char *out, size_t size) {
     if (p && CFGetTypeID(p) == CFStringGetTypeID())
         (void)CFStringGetCString((CFStringRef)p, name, sizeof name, kCFStringEncodingUTF8);
     if (p) CFRelease(p);
+    printable(name); /* the phone chooses it: no line breaks or terminal escapes */
     snprintf(out, size, "%s %04x:%04x", name, vid, pid);
     IOObjectRelease(device);
 }

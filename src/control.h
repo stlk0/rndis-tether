@@ -61,7 +61,7 @@ uint32_t control_next_id(void);
 
 void control_open(Control *c, UsbLink *u, const ControlEvents *events);
 /* Synchronous request: SEND, then poll for the matching completion for up to 3 s.
- * Unrelated messages met on the way go to events->message. NULL or a reason; *status
+ * Unrelated messages met on the way, also in the same reply, go to events->message. NULL or a reason; *status
  * is the USB status of a failed transfer. */
 const char *control_exchange(Control *c, const uint8_t *request, size_t request_size, uint32_t type,
                              uint32_t id, uint8_t *response, size_t *response_size, IOReturn *status);

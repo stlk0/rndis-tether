@@ -4,6 +4,7 @@
 #include "health.h"
 #include "log.h"
 #include "netif.h"
+#include "runtime.h"
 
 #include <dispatch/dispatch.h>
 #include <stdio.h>
@@ -30,6 +31,8 @@ typedef struct {
     RndisInitInfo init;
     unsigned mtu;
     bool link_down;
+    bool keepalive_reply_queued; /* the phone's KEEPALIVEs get one reply in the queue at a time */
+    bool created_interfaces;     /* the feth pair is ours to destroy */
 
     time_t connected_at;
     char address[16], gateway[16];
@@ -82,6 +85,7 @@ const char *session_failure(void) {
 static void keepalive_reply_done(void *context, ControlResult result, uint32_t status, uint32_t addressing_reset) {
     (void)context;
     (void)addressing_reset;
+    s.keepalive_reply_queued = false;
     if (result != CONTROL_SUCCESS) logdebug("keepalive reply failed (0x%08x)", status);
 }
 
@@ -97,7 +101,7 @@ static void media_status(uint32_t status) {
         if (!s.running) return;
         datapath_set_link(&s.data, true);
         /* Confirm the lease again; a changed router arrives through session_network_changed. */
-        if (was_down && !ipconfig_set(s.cfg->host, "DHCP")) logmsg("warning: ipconfig set %s DHCP failed", s.cfg->host);
+        if (was_down && !ipconfig_set(s.cfg->host, "DHCP")) fail("cannot restart DHCP after link up", kIOReturnSuccess);
     } else {
         logdebug("phone status indication 0x%08x", status);
     }
@@ -109,9 +113,15 @@ static void on_message(const uint8_t *b, size_t n) {
     if (type == RNDIS_INDICATE_STATUS_MSG && !rndis_parse_indicate(b, n, &status)) {
         media_status(status);
     } else if (type == RNDIS_KEEPALIVE_MSG && !rndis_parse_keepalive(b, n, &id)) {
+        /* A burst of them would otherwise overflow the control queue and end the session. */
+        if (s.keepalive_reply_queued) {
+            logdebug("phone KEEPALIVE 0x%08x: a reply is already queued", id);
+            return;
+        }
         ControlMessage reply = {.id = id, .done = keepalive_reply_done};
         reply.length = rndis_build_keepalive_cmplt(reply.bytes, id);
-        (void)control_send(&s.control, &reply, true);
+        /* Before control_run the reply goes at once and is done already. */
+        s.keepalive_reply_queued = control_send(&s.control, &reply, true) && s.control.running;
     } else {
         logdebug("ignored control message type 0x%08x", type);
     }
@@ -232,8 +242,7 @@ static void teardown(void) {
     control_close(&s.control);
     usb_close(&s.usb);
     ++generation;
-    feth_destroy(s.cfg->host);
-    feth_destroy(s.cfg->peer);
+    if (s.created_interfaces) runtime_destroy_interfaces(INTERFACES_PATH);
 }
 
 /* A start that failed half-way: undo it without a "disconnecting" line. */
@@ -331,9 +340,19 @@ const char *session_start(io_service_t device, const char *name, const Config *c
 
     char why[200];
     if (!feth_sysctls_ok(why, sizeof why)) return abandon(why);
-    feth_destroy(cfg->host);
-    feth_destroy(cfg->peer);
+    runtime_destroy_interfaces(INTERFACES_PATH); /* ours, left over; never another program's */
+    if (interface_exists(cfg->host) || interface_exists(cfg->peer)) {
+        snprintf(why, sizeof why, "%s already exists (made by another program?)",
+                 interface_exists(cfg->host) ? cfg->host : cfg->peer);
+        return abandon(why);
+    }
     if (!feth_create_pair(cfg->host, cfg->peer, s.mtu)) return abandon("cannot create feth interfaces");
+    if (!runtime_mark_interfaces(INTERFACES_PATH, cfg->host, cfg->peer)) {
+        feth_destroy(cfg->host);
+        feth_destroy(cfg->peer);
+        return abandon("cannot record the feth interfaces in " RUNTIME_DIR);
+    }
+    s.created_interfaces = true;
     unsigned bpf_size = BPF_BUFFER;
     int bpf = bpf_open_bound(cfg->peer, &bpf_size, why, sizeof why);
     if (bpf < 0) return abandon(why);
@@ -356,7 +375,7 @@ const char *session_start(io_service_t device, const char *name, const Config *c
     if (s.failing) return abandon(s.fail_reason);
     s.running = true;
 
-    if (!ipconfig_set(cfg->host, "DHCP")) logmsg("warning: ipconfig set %s DHCP failed", cfg->host);
+    if (!ipconfig_set(cfg->host, "DHCP")) return abandon("cannot start DHCP on the phone's interface");
     if (cfg->ipv6 && !ipconfig_set(cfg->host, "AUTOMATIC-V6")) logmsg("warning: IPv6 autoconfiguration failed");
     s.stats_logged_ms = now_ms();
     timer_set(tick_timer, 0.5);

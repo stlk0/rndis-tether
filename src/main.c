@@ -13,9 +13,9 @@
 
 static int list_devices(void) {
     unsigned count = 0;
-    for (unsigned kind = 0; kind < 2; ++kind) {
+    for (unsigned kind = 0; kind < USB_MATCHING_KINDS; ++kind) {
         io_iterator_t it = IO_OBJECT_NULL;
-        CFMutableDictionaryRef match = kind ? usb_create_cdc_rndis_matching() : usb_create_rndis_matching();
+        CFMutableDictionaryRef match = usb_create_matching(kind);
         if (!match || IOServiceGetMatchingServices(kIOMainPortDefault, match, &it) != KERN_SUCCESS) return 1;
         io_service_t service;
         while ((service = IOIteratorNext(it))) {
@@ -74,8 +74,8 @@ static int run(int argc, char **argv) {
             return 2;
         }
     }
-    if (!strcmp(cfg.host, cfg.peer)) {
-        fputs("the host and peer interfaces must differ\n", stderr);
+    if (!config_check(&cfg, why, sizeof why)) {
+        fprintf(stderr, "%s\n", why);
         return 2;
     }
     return daemon_run(&cfg, problem);
@@ -86,10 +86,6 @@ int main(int argc, char **argv) {
     if (!strcmp(command, "run")) return run(argc - 2, argv + 2);
     if (!strcmp(command, "config")) return cli_config(argc - 2, argv + 2);
     if (!strcmp(command, "status") && argc == 3 && !strcmp(argv[2], "--raw")) return cli_status(true);
-    /* Before subcommands existed the daemon took its options directly. */
-    if (command[0] == '-' && strcmp(command, "--help") && strcmp(command, "-h") && strcmp(command, "--version") &&
-        strcmp(command, "--list"))
-        return run(argc - 1, argv + 1);
     if (argc > 2) return usage(stderr, 2);
     if (!strcmp(command, "status")) return cli_status(false);
     if (!strcmp(command, "monitor")) return cli_monitor();

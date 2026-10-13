@@ -1,15 +1,19 @@
 /* Offline scenarios for the data path (datapath.c), KEEPALIVE and RESET (health.c),
- * the status reply (status.c) and the admin socket (admin.c). USB transfers and
- * control requests are captured by fakes and completed by hand; BPF is one end of a
- * socket pair; the admin socket is real, in /tmp, for the user's own group.
+ * the status reply and socket (status.c), the admin socket (admin.c) and how both
+ * sockets are put in place (runtime.c). USB transfers and control requests are captured
+ * by fakes and completed by hand; BPF is one end of a socket pair; the sockets are
+ * real, in a private directory under /tmp, for the user's own group.
  */
 #include "admin.h"
 #include "clock.h"
 #include "health.h"
+#include "runtime.h"
 #include "status.h"
 
 #include <fcntl.h>
+#include <errno.h>
 #include <poll.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -158,6 +162,28 @@ static void test_tx_batching(void) {
     datapath_send(&data, a, sizeof a);
     datapath_flush(&data);
     CHECK(write_count == 4 && data.stats.tx_dropped == 0);
+}
+
+/* A transfer of whole 512-byte packets ends with one zero byte; it counts towards the
+ * phone's MaxTransferSize too. */
+static void test_tx_transfer_limit(void) {
+    uint8_t big[1514], rest[2048 - 2 * RNDIS_PACKET_HEADER - 1514];
+    make_frame(big, sizeof big, 8);
+    make_frame(rest, sizeof rest, 9);
+    fixture(2048, 8); /* without the byte, both would make exactly 2048 */
+    datapath_send(&data, big, sizeof big);
+    datapath_send(&data, rest, sizeof rest);
+    CHECK(write_count == 1 && written_size == RNDIS_PACKET_HEADER + sizeof big);
+    complete_write(kIOReturnSuccess);
+    datapath_flush(&data);
+    CHECK(write_count == 2 && written_size <= 2048 && !data.stats.tx_dropped);
+    complete_write(kIOReturnSuccess);
+
+    fixture(1558, 8); /* the Linux gadget's limit: a full-size frame still goes in one transfer */
+    datapath_send(&data, big, sizeof big);
+    datapath_flush(&data);
+    CHECK(write_count == 1 && written_size == 1558 && !data.stats.tx_dropped);
+    complete_write(kIOReturnSuccess);
 }
 
 static void test_rx_delivery(void) {
@@ -310,12 +336,90 @@ static void test_status_format(void) {
     CHECK(status_format(&report, tiny, sizeof tiny) == sizeof tiny - 1 && strlen(tiny) == sizeof tiny - 1);
 }
 
-/* ------------------------------------------------------------ admin socket */
+/* ------------------------------------------------------------------ sockets */
 
-static char admin_path[64];
+static char socket_dir[64], admin_path[96], status_path[96];
 static unsigned set_calls;
 static uid_t set_uid;
 static char set_name[64], set_value[64];
+
+static int connect_to(const char *path) {
+    struct sockaddr_un address = {.sun_family = AF_UNIX};
+    strlcpy(address.sun_path, path, sizeof address.sun_path);
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    CHECK(fd >= 0 && !connect(fd, (const struct sockaddr *)&address, sizeof address));
+    return fd;
+}
+
+static void test_runtime(void) {
+    strlcpy(socket_dir, "/tmp/rndis-tether-test-XXXXXX", sizeof socket_dir);
+    CHECK(mkdtemp(socket_dir) != NULL);
+    CHECK(runtime_dir(socket_dir)); /* mkdtemp makes it 0700 */
+    char path[128], other[128];
+    snprintf(path, sizeof path, "%s/open", socket_dir);
+    CHECK(!mkdir(path, 0755) && !runtime_dir(path) && errno == EPERM);
+    CHECK(!rmdir(path));
+    snprintf(path, sizeof path, "%s/new", socket_dir);
+    CHECK(runtime_dir(path) && runtime_dir(path)); /* made, then found */
+    CHECK(!rmdir(path));
+
+    /* Whatever is at the public name is replaced, never followed: a symlink to someone
+     * else's file leaves that file alone. */
+    snprintf(path, sizeof path, "%s/victim", socket_dir);
+    snprintf(other, sizeof other, "%s/public.sock", socket_dir);
+    int victim = open(path, O_WRONLY | O_CREAT, 0600);
+    CHECK(victim >= 0 && !symlink(path, other));
+    close(victim);
+    int fd = runtime_listen(socket_dir, other, getgid(), 0666);
+    struct stat st;
+    CHECK(fd >= 0 && !lstat(other, &st) && S_ISSOCK(st.st_mode) && (st.st_mode & 0777) == 0666);
+    CHECK(!stat(path, &st) && S_ISREG(st.st_mode) && (st.st_mode & 0777) == 0600);
+    snprintf(path, sizeof path, "%s/public.sock.new", socket_dir);
+    CHECK(lstat(path, &st) && errno == ENOENT); /* nothing left in the private directory */
+    if (fd >= 0) close(fd);
+    unlink(other);
+    snprintf(path, sizeof path, "%s/victim", socket_dir);
+    unlink(path);
+}
+
+static unsigned reports;
+
+static size_t fake_report(char *buffer, size_t size) {
+    ++reports;
+    return (size_t)snprintf(buffer, size, "protocol=1\nstate=no-phone\n");
+}
+
+/* Clients that got their reply; the run loop is not run here. */
+static unsigned answered(const int *fd, unsigned count) {
+    unsigned n = 0;
+    for (unsigned i = 0; i < count; ++i) {
+        struct pollfd p = {.fd = fd[i], .events = POLLIN};
+        if (poll(&p, 1, 0) > 0) ++n;
+    }
+    return n;
+}
+
+static void test_status_socket(void) {
+    snprintf(status_path, sizeof status_path, "%s/status.sock", socket_dir);
+    CHECK(status_serve(socket_dir, status_path, fake_report));
+    struct stat st;
+    CHECK(!stat(status_path, &st) && (st.st_mode & 0777) == 0666);
+
+    /* A flood waits its turn: one batch per event, one report per batch. */
+    enum { CLIENTS = STATUS_ACCEPT_BATCH + 3 };
+    int fd[CLIENTS];
+    for (unsigned i = 0; i < CLIENTS; ++i) fd[i] = connect_to(status_path);
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0, true);
+    CHECK(answered(fd, CLIENTS) == STATUS_ACCEPT_BATCH && reports == 1);
+    for (int i = 0; i < 20 && answered(fd, CLIENTS) < CLIENTS; ++i)
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, true);
+    CHECK(answered(fd, CLIENTS) == CLIENTS && reports == 2);
+    char reply[64];
+    ssize_t n = read(fd[CLIENTS - 1], reply, sizeof reply - 1);
+    CHECK(n > 0 && !strncmp(reply, "protocol=1\n", 11));
+    for (unsigned i = 0; i < CLIENTS; ++i) close(fd[i]);
+    unlink(status_path);
+}
 
 static bool fake_set(uid_t uid, const char *name, const char *value, char *why, size_t why_size) {
     ++set_calls;
@@ -330,11 +434,7 @@ static bool fake_set(uid_t uid, const char *name, const char *value, char *why, 
 }
 
 static int admin_connect(void) {
-    struct sockaddr_un address = {.sun_family = AF_UNIX};
-    strlcpy(address.sun_path, admin_path, sizeof address.sun_path);
-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    CHECK(fd >= 0 && !connect(fd, (const struct sockaddr *)&address, sizeof address));
-    return fd;
+    return connect_to(admin_path);
 }
 
 /* Runs the daemon's run loop until the server closes the connection; the reply. */
@@ -365,8 +465,11 @@ static void test_admin_socket(void) {
     CHECK(admin_allowed(0, getgid()) && admin_allowed(getuid(), getgid()));
     CHECK(!admin_allowed((uid_t)-2, 80));
 
-    snprintf(admin_path, sizeof admin_path, "/tmp/rndis-tether-test-%d.sock", (int)getpid());
-    CHECK(admin_serve(admin_path, getgid(), fake_set));
+    snprintf(admin_path, sizeof admin_path, "%s/admin.sock", socket_dir);
+    int old = open(admin_path, O_WRONLY | O_CREAT, 0644); /* a stale file at the name is replaced */
+    CHECK(old >= 0);
+    if (old >= 0) close(old);
+    CHECK(admin_serve(socket_dir, admin_path, getgid(), fake_set));
     struct stat st;
     CHECK(!stat(admin_path, &st) && (st.st_mode & 0777) == 0660 && st.st_gid == getgid());
 
@@ -398,10 +501,12 @@ static void test_admin_socket(void) {
     CHECK(!strcmp(admin_reply(fd, reply, sizeof reply), "")); /* closed after the two-second timeout */
     CHECK(!strcmp(admin_ask("set prefer-phone yes\n", reply, sizeof reply), "ok\n") && set_calls == 4);
     unlink(admin_path);
+    CHECK(!rmdir(socket_dir)); /* nothing else was left there */
 }
 
 int main(void) {
     test_tx_batching();
+    test_tx_transfer_limit();
     test_rx_delivery();
     test_rx_abort_storm();
     test_reset_during_batch_flush();
@@ -409,6 +514,8 @@ int main(void) {
     test_keepalive();
     test_reset_limits();
     test_status_format();
+    test_runtime();
+    test_status_socket();
     test_admin_socket();
     datapath_close(&data);
     close(macos);

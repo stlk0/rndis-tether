@@ -89,8 +89,10 @@ RndisHealthAction rndis_keepalive_result(unsigned *failures, bool exchanged, uin
 RndisHealthAction rndis_reset_decision(uint64_t now, uint64_t last_reset, bool attempted, bool in_progress);
 
 /* Iterates Ethernet frames inside one bulk-IN transfer.
- * Returns 1 with *frame set, 0 at the end, -1 when the rest of the transfer is
- * malformed (the caller drops the remainder; the session keeps running). */
+ * Returns 1 with *frame set, 0 at the end, 2 for a message whose frame size is out of
+ * range (skipped: *why is set, *frame is not; the next message follows), -1 when the
+ * rest of the transfer is malformed (the caller drops the remainder; the session keeps
+ * running). */
 typedef struct { const uint8_t *p; size_t n; } RndisCursor;
 int rndis_next_frame(RndisCursor *c, const uint8_t **frame, size_t *length, const char **why);
 

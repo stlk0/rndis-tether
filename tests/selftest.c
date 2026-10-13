@@ -1,9 +1,13 @@
-/* Offline tests for rndis.c, the BPF record parser and the settings file. No USB, network or root.
+/* Offline tests for rndis.c, the BPF record parser, the settings file, the interface
+ * marker and device text. No USB, network or root.
  * Built with UBSan + Guard Malloc by `make check`. */
 #include "config.h"
+#include "log.h"
 #include "netif.h"
 #include "rndis.h"
+#include "runtime.h"
 
+#include <fcntl.h>
 #include <net/bpf.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -552,6 +556,54 @@ static void test_config(void) {
     CHECK(config_save(&c, path, why, sizeof why) && config_load(&d, path, why, sizeof why));
     CHECK(!memcmp(&c, &d, sizeof c));
     unlink(path);
+
+    /* The tail of an overlong line is not a setting; the next line keeps its number. */
+    char text[1200];
+    int used = snprintf(text, sizeof text, "# %0509d", 0);
+    snprintf(text + used, sizeof text - (size_t)used, "ipv6 = yes # %0600d\ntx-batch = x\n", 0);
+    config_defaults(&c);
+    CHECK(!load_text(&c, text, why, sizeof why) && !c.ipv6 && strstr(why, "line 1: line is too long"));
+    config_defaults(&c);
+    used = snprintf(text, sizeof text, "# %0509d", 0); /* 511 characters fit exactly */
+    snprintf(text + used, sizeof text - (size_t)used, "\nipv6 = yes\n");
+    CHECK(load_text(&c, text, why, sizeof why) && c.ipv6);
+    config_defaults(&c);
+    snprintf(text, sizeof text, "ipv6 = yes # %0498d", 0); /* 511 characters, no newline at the end */
+    CHECK(strlen(text) == 511 && load_text(&c, text, why, sizeof why) && c.ipv6);
+    CHECK(!load_text(&c, "verbose = yes # long enough to need no newline\nipv6\n", why, sizeof why) &&
+          strstr(why, "line 2"));
+}
+
+static void test_device_text(void) {
+    char text[] = "A\nb=1\x1b[2J\x7f\xc2\x9b~ ", empty[] = "";
+    printable(text);
+    CHECK(!strcmp(text, "A?b=1?[2J???~ "));
+    printable(empty);
+    CHECK(!empty[0]);
+}
+
+static void test_interface_marker(void) {
+    char path[] = "/tmp/rndis-tether-selftest-XXXXXX", host[IFNAMSIZ], peer[IFNAMSIZ];
+    int fd = mkstemp(path);
+    CHECK(fd >= 0);
+    if (fd >= 0) close(fd);
+    CHECK(runtime_mark_interfaces(path, "feth50", "feth51") && runtime_marked_interfaces(path, host, peer));
+    CHECK(!strcmp(host, "feth50") && !strcmp(peer, "feth51"));
+    /* Only two different fethN are ever handed to `ifconfig destroy`. */
+    static const char *const bad[] = {"", "feth50\n", "feth50 feth50\n", "feth50 en0\n", "feth50 feth51 x\n",
+                                      "fethx feth51\n", "feth50 feth123456789012345\n", "-x feth51\n"};
+    for (size_t i = 0; i < sizeof bad / sizeof *bad; ++i) {
+        fd = open(path, O_WRONLY | O_TRUNC);
+        CHECK(fd >= 0 && write(fd, bad[i], strlen(bad[i])) == (ssize_t)strlen(bad[i]));
+        if (fd >= 0) close(fd);
+        CHECK(!runtime_marked_interfaces(path, host, peer));
+    }
+    CHECK(!runtime_mark_interfaces("/nonexistent/marker", "feth50", "feth51"));
+    runtime_destroy_interfaces(path); /* names nothing valid: just removed */
+    CHECK(access(path, F_OK) && !runtime_marked_interfaces(path, host, peer));
+    /* A marker is never followed through a symlink. */
+    CHECK(!symlink("/etc/hosts", path) && !runtime_mark_interfaces(path, "feth50", "feth51"));
+    unlink(path);
 }
 
 int main(void) {
@@ -564,6 +616,8 @@ int main(void) {
     test_bpf_records();
     test_bpf_batch_records();
     test_config();
+    test_device_text();
+    test_interface_marker();
     fuzz();
     printf("selftest: %u checks, %u failures\n", tests, failures);
     return failures ? 1 : 0;

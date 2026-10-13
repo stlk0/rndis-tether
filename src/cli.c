@@ -1,59 +1,69 @@
 #include "cli.h"
 #include "config.h"
 #include "netif.h"
+#include "runtime.h"
 
 #include <copyfile.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <mach-o/dyld.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
 
-#define LEGACY_LABEL "local.rndis-tether"
 #define COMMAND_LINK "/usr/local/bin/rndis-tether"
 #define LOG_HINT "/usr/bin/log show --last 30m --style compact --predicate 'subsystem == \"" LABEL "\"'"
 
 /* ------------------------------------------------------------ talking to the daemon */
 
-bool status_query(char *text, size_t size) {
+/* Connects to one of the service's sockets; -1 unless root is listening there. A
+ * process of group daemon could put its own socket into /var/run. */
+static int connect_service(const char *path, int seconds) {
     struct sockaddr_un address = {.sun_family = AF_UNIX};
-    strlcpy(address.sun_path, STATUS_SOCKET, sizeof address.sun_path);
+    strlcpy(address.sun_path, path, sizeof address.sun_path);
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) return false;
-    struct timeval timeout = {2, 0};
+    if (fd < 0) return -1;
+    struct timeval timeout = {seconds, 0};
+    int one = 1;
     (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof timeout);
-    bool connected = !connect(fd, (const struct sockaddr *)&address, sizeof address);
+    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof timeout);
+    (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+    uid_t uid = 0;
+    gid_t gid;
+    if (connect(fd, (const struct sockaddr *)&address, sizeof address) || getpeereid(fd, &uid, &gid) || uid) {
+        int error = uid ? ECONNREFUSED : errno; /* ask_service tells EACCES (not an administrator) apart */
+        close(fd);
+        errno = error;
+        return -1;
+    }
+    return fd;
+}
+
+/* The running daemon's state as "name=value" lines; false when no daemon answers. */
+static bool status_query(char *text, size_t size) {
+    int fd = connect_service(STATUS_SOCKET, 2);
     size_t used = 0;
     ssize_t n;
-    while (connected && used + 1 < size && (n = read(fd, text + used, size - 1 - used)) > 0) used += (size_t)n;
-    close(fd);
+    while (fd >= 0 && used + 1 < size && (n = read(fd, text + used, size - 1 - used)) > 0) used += (size_t)n;
+    if (fd >= 0) close(fd);
     if (size) text[used] = 0;
-    return connected && used > 0;
+    return used > 0;
 }
 
 /* A setting the running service applies at once. 1: applied; 0: refused, see why;
  * -1: no service answers, so only the file can change. */
 static int ask_service(const char *name, const char *value, char *why, size_t why_size) {
-    struct sockaddr_un address = {.sun_family = AF_UNIX};
-    strlcpy(address.sun_path, ADMIN_SOCKET, sizeof address.sun_path);
-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
-    struct timeval timeout = {5, 0};
-    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof timeout);
-    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof timeout);
-    int one = 1;
-    (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
-    if (connect(fd, (const struct sockaddr *)&address, sizeof address)) {
-        bool denied = errno == EACCES;
-        close(fd);
-        if (!denied) return -1;
+    int fd = connect_service(ADMIN_SOCKET, 5);
+    if (fd < 0) {
+        if (errno != EACCES) return -1;
         strlcpy(why, "only administrators of this Mac can change settings", why_size);
         return 0;
     }
@@ -123,6 +133,11 @@ static const char *advice(const char *problem) {
     if (strstr(problem, "net.link.fake"))
         return "A macOS setting for virtual network interfaces was changed (see above). Restarting\n"
                "  the Mac restores it.";
+    if (strstr(problem, "already exists"))
+        return "Another program (a VPN or another tethering tool?) uses that network interface.\n"
+               "  Quit it, or let rndis-tether use other names:\n"
+               "    sudo rndis-tether config host-interface feth52\n"
+               "    sudo rndis-tether config peer-interface feth53";
     if (strstr(problem, "data interface not found"))
         return "The phone is still switching USB tethering on. Wait a few seconds.";
     return "rndis-tether keeps trying by itself. If this does not go away, unlock the phone and\n"
@@ -314,18 +329,6 @@ static void self_path(char *out, size_t size) {
     out[0] = 0;
 }
 
-/* Earlier versions: label local.rndis-tether, a log file and a newsyslog entry. */
-static void remove_legacy(void) {
-    struct stat st;
-    if (stat("/Library/LaunchDaemons/" LEGACY_LABEL ".plist", &st)) return;
-    if (loaded(LEGACY_LABEL)) (void)launchctl("bootout", "system/" LEGACY_LABEL, NULL, true);
-    unlink("/Library/LaunchDaemons/" LEGACY_LABEL ".plist");
-    unlink("/Library/PrivilegedHelperTools/" LEGACY_LABEL);
-    unlink("/etc/newsyslog.d/rndis-tether.conf");
-    unlink("/var/log/rndis-tether.log");
-    puts("Removed an earlier installation (" LEGACY_LABEL ").");
-}
-
 static bool install_binary(const char *self, char *why, size_t why_size) {
     if (!strcmp(self, HELPER_PATH)) return true; /* reinstalling from the installed copy */
     const char *temporary = HELPER_PATH ".new";
@@ -360,6 +363,8 @@ static bool write_plist(char *why, size_t why_size) {
         "    <true/>\n"
         "    <key>ThrottleInterval</key>\n"
         "    <integer>10</integer>\n"
+        "    <key>ExitTimeOut</key>\n"     /* the longest teardown takes about 21 s */
+        "    <integer>30</integer>\n"
         "</dict>\n"
         "</plist>\n";
     const char *temporary = PLIST_PATH ".new";
@@ -399,9 +404,9 @@ int cli_install(void) {
         fputs("Installation failed: cannot find this program's own file.\n", stderr);
         return 1;
     }
-    remove_legacy();
     bool updating = loaded(LABEL);
     if (updating) (void)launchctl("bootout", "system/" LABEL, NULL, true);
+    unlink(OLD_LOCK_PATH);
     if (!install_binary(self, why, sizeof why) || !write_plist(why, sizeof why)) {
         fprintf(stderr, "Installation failed: %s\n", why);
         return 1;
@@ -427,25 +432,27 @@ int cli_install(void) {
 
 int cli_uninstall(void) {
     if (!need_root("uninstall")) return 1;
-    Config config;
-    char why[400], self[PATH_MAX];
-    config_defaults(&config);
-    (void)config_load(&config, CONFIG_PATH, why, sizeof why); /* for the interface names */
-    bool installed = service_installed();
+    char self[PATH_MAX];
     if (loaded(LABEL)) (void)launchctl("bootout", "system/" LABEL, NULL, true);
-    remove_legacy();
     unlink(PLIST_PATH);
     unlink(HELPER_PATH);
     unlink(CONFIG_PATH);
-    unlink(STATUS_SOCKET);
-    unlink(ADMIN_SOCKET);
-    unlink(LOCK_PATH);
+    unlink(OLD_LOCK_PATH);
     unlink_command();
-    if (installed) { /* only left behind if the daemon was killed; otherwise they may not be ours */
-        feth_destroy(config.host);
-        feth_destroy(config.peer);
+    /* A foreground `run` still holds the lock: its sockets, interfaces and lock stay,
+     * or a second daemon could start next to it. */
+    int lock = open(LOCK_PATH, O_RDWR | O_NOFOLLOW | O_CLOEXEC);
+    bool running = lock >= 0 && flock(lock, LOCK_EX | LOCK_NB);
+    if (!running) {
+        unlink(STATUS_SOCKET);
+        unlink(ADMIN_SOCKET);
+        runtime_destroy_interfaces(INTERFACES_PATH); /* only left behind if the daemon was killed */
+        unlink(LOCK_PATH);
+        rmdir(RUNTIME_DIR);
     }
+    if (lock >= 0) close(lock);
     puts("rndis-tether is removed: the background service, its settings and its network interfaces.");
+    if (running) puts("A foreground `rndis-tether run` is still running; stop it with Ctrl-C.");
     self_path(self, sizeof self);
     if (strstr(self, "/Cellar/")) puts("To remove the program itself as well:  brew uninstall rndis-tether");
     return 0;

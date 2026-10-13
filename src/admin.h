@@ -18,7 +18,8 @@ typedef bool (*AdminSet)(uid_t uid, const char *name, const char *value, char *w
 
 /* Root, or a member of group gid. */
 bool admin_allowed(uid_t uid, gid_t gid);
-/* Creates the socket at path for root and group gid; false if it cannot be set up. */
-bool admin_serve(const char *path, gid_t gid, AdminSet set);
+/* Creates the socket at path for root and group gid, prepared in dir (runtime.h);
+ * false if it cannot be set up. */
+bool admin_serve(const char *dir, const char *path, gid_t gid, AdminSet set);
 
 #endif

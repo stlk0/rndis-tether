@@ -1,13 +1,11 @@
 #include "status.h"
+#include "runtime.h"
 
 #include <dispatch/dispatch.h>
-#include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/un.h>
 #include <unistd.h>
 
 static void put(char **at, size_t *left, const char *format, ...) __attribute__((format(printf, 3, 4)));
@@ -48,13 +46,17 @@ typedef struct {
     size_t (*report)(char *buffer, size_t size);
 } Server;
 
-/* The reply fits the socket buffer, so the write never blocks. */
-static void accept_all(void *context) {
+/* A bounded batch per event, with one report for all of it: a flood of clients must not
+ * keep USB completions, BPF and timers waiting. The source fires again for the rest.
+ * The reply fits the socket buffer, so the write never blocks. */
+static void accept_some(void *context) {
     const Server *server = context;
-    int fd;
-    while ((fd = accept(server->listener, NULL, NULL)) >= 0) {
-        char text[2048];
-        size_t n = server->report(text, sizeof text);
+    char text[2048];
+    size_t n = 0;
+    for (unsigned i = 0; i < STATUS_ACCEPT_BATCH; ++i) {
+        int fd = accept(server->listener, NULL, NULL);
+        if (fd < 0) return;
+        if (!n) n = server->report(text, sizeof text);
         int one = 1;
         (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
         (void)write(fd, text, n);
@@ -62,27 +64,20 @@ static void accept_all(void *context) {
     }
 }
 
-bool status_serve(size_t (*report)(char *buffer, size_t size)) {
+bool status_serve(const char *dir, const char *path, size_t (*report)(char *buffer, size_t size)) {
     static Server server; /* lives as long as the daemon */
-    struct sockaddr_un address = {.sun_family = AF_UNIX};
-    strlcpy(address.sun_path, STATUS_SOCKET, sizeof address.sun_path);
-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    unlink(STATUS_SOCKET);
-    if (fd < 0 || fcntl(fd, F_SETFD, FD_CLOEXEC) || fcntl(fd, F_SETFL, O_NONBLOCK) ||
-        bind(fd, (const struct sockaddr *)&address, sizeof address) || chmod(STATUS_SOCKET, 0666) ||
-        listen(fd, 8)) {
-        if (fd >= 0) close(fd);
-        return false;
-    }
+    int fd = runtime_listen(dir, path, getegid(), 0666);
+    if (fd < 0) return false;
     server = (Server){fd, report};
     dispatch_source_t source = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, (uintptr_t)fd, 0,
                                                       dispatch_get_main_queue());
     if (!source) {
         close(fd);
+        unlink(path);
         return false;
     }
     dispatch_set_context(source, &server);
-    dispatch_source_set_event_handler_f(source, accept_all);
+    dispatch_source_set_event_handler_f(source, accept_some);
     dispatch_resume(source);
     return true;
 }

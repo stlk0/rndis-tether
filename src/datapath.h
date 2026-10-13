@@ -59,6 +59,7 @@ struct Datapath {
     UsbLink *usb;
     const DatapathEvents *events;
     DatapathLimits limits;
+    size_t tx_limit; /* bytes per bulk OUT transfer, a terminating zero byte included */
     bool stopped, link_down, held;
 
     int bpf;

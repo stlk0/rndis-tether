@@ -3,6 +3,7 @@
 #include "clock.h"
 #include "log.h"
 #include "netif.h"
+#include "runtime.h"
 #include "session.h"
 #include "status.h"
 #include "usb.h"
@@ -153,14 +154,10 @@ static void forget_device(void) {
     g.device_cdc = g.device_rejected = false;
 }
 
-static CFMutableDictionaryRef create_device_matching(unsigned kind) {
-    return kind ? usb_create_cdc_rndis_matching() : usb_create_rndis_matching();
-}
-
 static void rescan_devices(void) {
-    for (unsigned kind = 0; kind < 2; ++kind) {
+    for (unsigned kind = 0; kind < USB_MATCHING_KINDS; ++kind) {
         io_iterator_t existing = IO_OBJECT_NULL;
-        CFMutableDictionaryRef match = create_device_matching(kind);
+        CFMutableDictionaryRef match = usb_create_matching(kind);
         if (match && IOServiceGetMatchingServices(kIOMainPortDefault, match, &existing) == KERN_SUCCESS) {
             device_matched(NULL, existing);
             IOObjectRelease(existing);
@@ -231,8 +228,8 @@ static bool watch_devices(void) {
     g.port = IONotificationPortCreate(kIOMainPortDefault);
     if (!g.port) return false;
     CFRunLoopAddSource(CFRunLoopGetMain(), IONotificationPortGetRunLoopSource(g.port), kCFRunLoopDefaultMode);
-    for (unsigned kind = 0; kind < 2; ++kind) {
-        CFMutableDictionaryRef match = create_device_matching(kind);
+    for (unsigned kind = 0; kind < USB_MATCHING_KINDS; ++kind) {
+        CFMutableDictionaryRef match = usb_create_matching(kind);
         if (!match || IOServiceAddMatchingNotification(g.port, kIOFirstMatchNotification, match, device_matched,
                                                        NULL, &g.matches[kind]) != KERN_SUCCESS) return false;
         device_matched(NULL, g.matches[kind]); /* also arms notifications for devices already present */
@@ -339,16 +336,18 @@ static bool change_setting(uid_t uid, const char *name, const char *value, char 
 
 static void serve_admin(void) {
     const struct group *admin = getgrnam("admin");
-    if (!admin || !admin_serve(ADMIN_SOCKET, admin->gr_gid, change_setting))
+    if (!admin || !admin_serve(RUNTIME_DIR, ADMIN_SOCKET, admin->gr_gid, change_setting))
         logmsg("warning: settings can be changed only with sudo and a restart: %s",
                admin ? strerror(errno) : "no admin group");
 }
 
 /* -------------------------------------------------------------------- run */
 
-/* Held for the daemon's lifetime; the kernel releases it however the process ends. */
+/* Held for the daemon's lifetime; the kernel releases it however the process ends.
+ * Only root can open it: a user holding it would keep the service from starting. */
 static bool take_lock(void) {
-    int fd = open(LOCK_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    if (!runtime_dir(RUNTIME_DIR)) return false;
+    int fd = open(LOCK_PATH, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
     return fd >= 0 && !flock(fd, LOCK_EX | LOCK_NB);
 }
 
@@ -366,6 +365,9 @@ int daemon_run(const Config *cfg, const char *settings_problem) {
             fputs("rndis-tether is already running (the installed service?). To run it here instead:\n"
                   "  sudo launchctl bootout system/" LABEL "\n"
                   "and afterwards start the service again with:  sudo rndis-tether install\n", stderr);
+        else if (errno == EPERM)
+            fputs(RUNTIME_DIR " must be a directory only root can use (mode 0700); remove it and try again\n",
+                  stderr);
         else perror(LOCK_PATH);
         return 1;
     }
@@ -374,9 +376,8 @@ int daemon_run(const Config *cfg, const char *settings_problem) {
            g.cfg.prefer_phone ? ", prefer phone for internet" : "", g.cfg.ipv6 ? ", IPv6" : "");
     if (settings_problem[0]) logmsg("settings: %s; that line is ignored", settings_problem);
 
-    /* A previous instance may have been killed without cleanup. */
-    feth_destroy(g.cfg.host);
-    feth_destroy(g.cfg.peer);
+    /* A previous instance may have been killed without cleanup; only its own interfaces go. */
+    runtime_destroy_interfaces(INTERFACES_PATH);
 
     g.retry_timer = timer_new(retry_fired, NULL, 0, 0.5);
     if (!netstate_watch(session_network_changed)) {
@@ -386,7 +387,8 @@ int daemon_run(const Config *cfg, const char *settings_problem) {
     watch_signal(0, SIGTERM);
     watch_signal(1, SIGINT);
     watch_signal(2, SIGHUP);
-    if (!status_serve(status_report)) logmsg("warning: no answers for `rndis-tether status`: %s", strerror(errno));
+    if (!status_serve(RUNTIME_DIR, STATUS_SOCKET, status_report))
+        logmsg("warning: no answers for `rndis-tether status`: %s", strerror(errno));
     serve_admin();
     watch_power();
     if (!watch_devices()) {

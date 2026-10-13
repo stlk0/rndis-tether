@@ -7,9 +7,6 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-/* The running daemon's state as "name=value" lines; false when no daemon answers. */
-bool status_query(char *text, size_t size);
-
 int cli_install(void);
 int cli_uninstall(void);
 int cli_restart(void);

@@ -37,6 +37,18 @@ void control_close(Control *c) {
     }
 }
 
+/* A reply usually holds one message but may hold several: true and the length of the
+ * one at offset at; false at the end or at a malformed one. */
+static bool next_message(const uint8_t *b, size_t n, size_t at, size_t *length) {
+    if (at >= n) return false;
+    if (!rndis_control_type(b + at, n - at)) {
+        logdebug("ignored malformed control response (%zu bytes)", n - at);
+        return false;
+    }
+    *length = rndis_le32(b + at + 4);
+    return true;
+}
+
 const char *control_exchange(Control *c, const uint8_t *request, size_t request_size, uint32_t type,
                              uint32_t id, uint8_t *response, size_t *response_size, IOReturn *status) {
     *status = usb_send_encapsulated(c->usb, request, (uint16_t)request_size, 1000);
@@ -52,11 +64,15 @@ const char *control_exchange(Control *c, const uint8_t *request, size_t request_
         /* An empty reply, a single zero byte or a control-pipe stall all mean "not ready yet". */
         if (r == kIOReturnSuccess && got && !(got == 1 && response[0] == 0)) {
             c->events->heard();
-            if (rndis_completion_matches(response, got, type, id)) {
-                *response_size = got;
-                return NULL;
+            size_t length = 0;
+            for (size_t at = 0; next_message(response, got, at, &length); at += length) {
+                if (rndis_completion_matches(response + at, length, type, id)) {
+                    memmove(response, response + at, length);
+                    *response_size = length;
+                    return NULL;
+                }
+                c->events->message(response + at, length);
             }
-            c->events->message(response, got);
             continue;
         }
         sleep_ms(GET_RETRY_MS);
@@ -138,18 +154,9 @@ static void transfer_done(UsbTransfer *t, IOReturn status, size_t n) {
         }
     } else if (!status && n && !(n == 1 && c->response[0] == 0)) {
         c->events->heard();
-        /* Usually one message; accept a bounded sequence without losing indications. */
-        size_t at = 0;
-        while (at < n && !c->stopped) {
-            uint32_t type = rndis_control_type(c->response + at, n - at);
-            if (!type) {
-                logdebug("ignored malformed control response (%zu bytes)", n - at);
-                break;
-            }
-            size_t length = rndis_le32(c->response + at + 4);
+        size_t length = 0;
+        for (size_t at = 0; !c->stopped && next_message(c->response, n, at, &length); at += length)
             dispatch(c, c->response + at, length);
-            at += length;
-        }
         c->notified = true; /* drain what follows, including unsolicited messages while idle */
     } else {
         c->poll_at = now + GET_RETRY_MS; /* empty reply, single zero, or stall: not ready yet */

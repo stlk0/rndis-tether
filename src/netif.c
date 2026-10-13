@@ -124,8 +124,9 @@ bool feth_create_pair(const char *host, const char *peer, unsigned mtu) {
     for (size_t i = 0; i < sizeof steps / sizeof *steps; ++i) {
         if (!run(steps[i])) {
             logmsg("ifconfig step failed: %s %s", steps[i][1], steps[i][2]);
-            feth_destroy(host);
-            feth_destroy(peer);
+            /* Steps 0 and 1 create the pair: only what was created here is destroyed. */
+            if (i > 0) feth_destroy(host);
+            if (i > 1) feth_destroy(peer);
             return false;
         }
     }

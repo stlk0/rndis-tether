@@ -1,5 +1,6 @@
 #include "admin.h"
 #include "clock.h"
+#include "runtime.h"
 
 #include <dispatch/dispatch.h>
 #include <errno.h>
@@ -8,8 +9,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/un.h>
 #include <unistd.h>
 
 #define REQUEST_MAX 256u
@@ -116,21 +115,9 @@ static void accept_one(void *context) {
     timer_set(a.timeout, REQUEST_TIMEOUT);
 }
 
-bool admin_serve(const char *path, gid_t gid, AdminSet set) {
-    struct sockaddr_un address = {.sun_family = AF_UNIX};
-    if (strlcpy(address.sun_path, path, sizeof address.sun_path) >= sizeof address.sun_path) return false;
-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    unlink(path);
-    /* Created owner-only, so nobody else can connect before the group gets access. */
-    mode_t umask_before = umask(0177);
-    bool bound = fd >= 0 && !fcntl(fd, F_SETFD, FD_CLOEXEC) && !fcntl(fd, F_SETFL, O_NONBLOCK) &&
-                 !bind(fd, (const struct sockaddr *)&address, sizeof address);
-    umask(umask_before);
-    if (!bound || chown(path, (uid_t)-1, gid) || chmod(path, 0660) || listen(fd, 8)) {
-        if (fd >= 0) close(fd);
-        if (bound) unlink(path);
-        return false;
-    }
+bool admin_serve(const char *dir, const char *path, gid_t gid, AdminSet set) {
+    int fd = runtime_listen(dir, path, gid, 0660);
+    if (fd < 0) return false;
     a = (Server){.listener = fd, .gid = gid, .set = set, .fd = -1};
     a.timeout = timer_new(timed_out, NULL, 0, 0.1);
     a.accepting = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, (uintptr_t)fd, 0, dispatch_get_main_queue());

@@ -353,6 +353,21 @@ static void test_exchange(void) {
     ControlMessage request_later = {.type = RNDIS_KEEPALIVE_MSG, .id = 2, .done = result_done};
     request_later.length = rndis_build_keepalive(request_later.bytes, 2);
     CHECK(!control_send(&control, &request_later, false) && !control.count);
+
+    /* One reply that carries an indication and then the completion. */
+    uint8_t both[sizeof indication + sizeof completion];
+    memcpy(both, indication, sizeof indication);
+    rndis_build_keepalive_cmplt(both + sizeof indication, 79);
+    script[0] = both;
+    script_size[0] = sizeof both;
+    script_next = 0;
+    script_count = 1;
+    unsigned messages_before = messages;
+    started = test_now;
+    e = control_exchange(&control, request, rndis_build_keepalive(request, 79), RNDIS_KEEPALIVE_MSG, 79, response,
+                         &n, &status);
+    CHECK(!e && n == sizeof completion && rndis_le32(response + 8) == 79);
+    CHECK(messages == messages_before + 1 && last_message_type == RNDIS_INDICATE_STATUS_MSG && test_now == started);
 }
 
 int main(void) {

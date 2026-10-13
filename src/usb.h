@@ -28,13 +28,15 @@ typedef struct {
     uint32_t generation; /* completions of an earlier open are dropped */
 } UsbLink;
 
-/* Matching dictionary for RNDIS control interfaces (consumed by IOKit calls). */
-CFMutableDictionaryRef usb_create_rndis_matching(void);
-CFMutableDictionaryRef usb_create_cdc_rndis_matching(void);
+/* Matching dictionary for RNDIS control interfaces (consumed by IOKit calls), one of
+ * USB_MATCHING_KINDS: 0 for e0/01/03, 1 for the Android variant 02/02/ff. */
+#define USB_MATCHING_KINDS 2u
+CFMutableDictionaryRef usb_create_matching(unsigned kind);
 /* Inspects cached descriptors through a user client without opening the interface. */
 bool usb_rndis_candidate(io_service_t service, bool *cdc);
 
-/* Human-readable "name vid:pid" of the device owning an interface, for logs. */
+/* Human-readable "name vid:pid" of the device owning an interface, for logs and status;
+ * the name the device reports is reduced to printable ASCII. */
 void usb_describe(io_service_t interface, char *out, size_t size);
 /* False once the interface has left the registry (unplugged, or the phone re-enumerated). */
 bool usb_attached(io_service_t interface);

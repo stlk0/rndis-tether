@@ -49,3 +49,8 @@ void logdebug(const char *format, ...) {
     write_line(format, args);
     va_end(args);
 }
+
+void printable(char *text) {
+    for (; *text; ++text)
+        if ((unsigned char)*text < 0x20 || (unsigned char)*text > 0x7e) *text = '?';
+}
