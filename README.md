@@ -45,7 +45,7 @@ brew install stlk0/tap/rndis-tether
 sudo rndis-tether install
 ```
 
-Either way, the installer ends with `rndis-tether 1.0.1 is installed` and the current
+Either way, the installer ends with `rndis-tether 1.1.0 is installed` and the current
 status. macOS may show a notification "Background Items Added": that is rndis-tether,
 leave it allowed.
 
@@ -79,6 +79,19 @@ Traffic:  received 771.7 MB, sent 162.5 MB
 
 When something is wrong, `status` says what and what to do about it. For a live view
 with speeds, run `rndis-tether monitor` (Ctrl-C to quit).
+
+## Disconnect without unplugging
+
+To stop using the phone's internet while the cable stays plugged in (for example to
+charge the phone):
+
+```bash
+rndis-tether disconnect
+```
+
+`status` then shows *disconnected*. To use the phone again: `rndis-tether connect`.
+Administrators of the Mac need no `sudo` for either. This is not saved: when the Mac
+restarts, rndis-tether connects again as usual.
 
 ## Settings
 
@@ -210,6 +223,8 @@ apps -> macOS TCP/IP -> feth50 (DHCP from the phone, via macOS's own ipconfig)
 ```
 rndis-tether status [--raw]          is it working, and what to do if not
 rndis-tether monitor                 live status and speed
+rndis-tether disconnect              stop using the phone without unplugging it
+rndis-tether connect                 use the phone again
 sudo rndis-tether install            install or update the service
 sudo rndis-tether uninstall          remove the service, settings and interfaces
 rndis-tether config                  show settings
@@ -246,9 +261,10 @@ names you do not know.
 | Field | Meaning |
 | --- | --- |
 | `protocol`, `version`, `pid` | Status format, version and process of the service |
-| `state` | `no-phone`, `unsupported`, `sleeping`, `retrying`, `connecting` or `online` |
+| `state` | `paused`, `no-phone`, `unsupported`, `sleeping`, `retrying`, `connecting` or `online` |
 | `prefer-phone` | `yes` or `no` |
-| `phone` | USB name of the phone, when one is plugged in |
+| `paused` | `yes` after `rndis-tether disconnect`, otherwise `no`; missing before version 1.1.0 |
+| `phone` | USB name of the phone, when one is plugged in (also while paused) |
 | `interface`, `connected-since` | `feth50`, and when the connection started (Unix time); while connected |
 | `address`, `gateway` | The Mac's address from the phone, and the phone's; once DHCP has answered |
 | `primary` | The interface macOS sends internet traffic to now; while connected |
@@ -257,8 +273,9 @@ names you do not know.
 | `problem` | Why the last attempt to connect failed |
 | `settings-problem` | A line in the settings file that could not be read |
 
-Speed is the difference between two readings of `rx-bytes`/`tx-bytes`; the counters
-start from zero with every connection.
+`state=paused` comes before every other state: while paused there is no connection,
+with or without a phone. Speed is the difference between two readings of
+`rx-bytes`/`tx-bytes`; the counters start from zero with every connection.
 
 **Settings**, `/var/run/rndis-tether-admin.sock`, owned by `root:admin` with mode `0660`:
 only root and administrators can connect, and the service checks the caller again.
@@ -267,10 +284,18 @@ Send one line, read one line back:
 ```
 set prefer-phone no      ->   ok
 set verbose maybe        ->   error: verbose must be yes or no, not "maybe"
+set paused yes           ->   ok
 ```
 
 Only `prefer-phone` and `verbose` can be set this way. The service applies the change
 at once and saves it in `/etc/rndis-tether.conf`.
+
+`set paused yes` disconnects the phone as unplugging would (the network interfaces go
+away) and keeps the service from connecting again, also when a phone is plugged in or
+the Mac wakes; `set paused no` connects a phone that is plugged in. Setting the value it
+already has just answers `ok`. This is what `rndis-tether disconnect` and `connect` do.
+It is never saved: every start of the service (the Mac starting, `install`, a restart
+after a crash) begins with `paused=no`.
 
 ### Logs
 

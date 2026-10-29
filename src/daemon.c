@@ -50,6 +50,7 @@ static struct {
     IONotificationPortRef power_port;
     io_object_t power_notifier;
     bool sleeping, shutting_down;
+    bool paused; /* runtime only: never saved, so every start begins connected */
 } g;
 
 static void device_removed(void);
@@ -72,7 +73,7 @@ static bool failure_worth_logging(const char *reason) {
 }
 
 static bool may_connect(void) {
-    return g.device && !g.device_rejected && !g.sleeping && !g.shutting_down;
+    return g.device && !g.device_rejected && !g.sleeping && !g.paused && !g.shutting_down;
 }
 
 static void schedule_retry(bool quiet) {
@@ -296,14 +297,16 @@ static void watch_signal(unsigned slot, int signal_number) {
 static size_t status_report(char *buffer, size_t size) {
     SessionStatus session;
     bool active = session_status(&session);
-    const char *state = !g.device ? "no-phone" : g.device_rejected ? "unsupported" : g.sleeping ? "sleeping" :
+    const char *state = g.paused ? "paused" : !g.device ? "no-phone" : g.device_rejected ? "unsupported" :
+                        g.sleeping ? "sleeping" :
                         active ? (session.address[0] ? "online" : "connecting") :
                         g.last_failure[0] ? "retrying" : "connecting";
     StatusReport report = {
         .state = state,
         .prefer_phone = g.cfg.prefer_phone,
+        .paused = g.paused,
         .phone = g.device ? g.device_name : NULL,
-        .problem = g.device && !active && g.last_failure[0] ? g.last_failure : NULL,
+        .problem = g.device && !active && !g.paused && g.last_failure[0] ? g.last_failure : NULL,
         .settings_problem = g.settings_problem[0] ? g.settings_problem : NULL,
         .session = active ? &session : NULL,
     };
@@ -312,8 +315,43 @@ static size_t status_report(char *buffer, size_t size) {
 
 /* --------------------------------------------------------------- settings */
 
+static const char *user_name(uid_t uid) {
+    const struct passwd *user = getpwuid(uid);
+    return user ? user->pw_name : "an administrator";
+}
+
+/* After the admin reply: a teardown can take seconds, longer than a client waits. */
+static void pause_now(void *context) {
+    (void)context;
+    if (g.paused) disconnect("paused", false);
+}
+
+/* `set paused yes|no`: not a setting, never saved. Pausing ends the session as sleep
+ * does (HALT, interfaces removed) and keeps new ones from starting; resuming connects
+ * a phone that is plugged in, as when it was plugged in. */
+static bool set_paused(uid_t uid, const char *value, char *why, size_t why_size) {
+    bool paused = !strcmp(value, "yes");
+    if (!paused && strcmp(value, "no")) {
+        snprintf(why, why_size, "paused must be yes or no, not \"%s\"", value);
+        return false;
+    }
+    if (paused == g.paused) return true;
+    g.paused = paused;
+    logmsg("%s by %s", paused ? "paused" : "resumed", user_name(uid));
+    if (paused) {
+        timer_disarm(g.retry_timer);
+        dispatch_async_f(dispatch_get_main_queue(), NULL, pause_now);
+    } else if (g.device && !session_active()) {
+        g.attempts = g.failure_repeats = g.init_failures = 0;
+        g.last_failure[0] = 0;
+        if (may_connect()) timer_set(g.retry_timer, 1.0);
+    }
+    return true;
+}
+
 /* From the admin socket: a setting the service applies at once, also saved in the file. */
 static bool change_setting(uid_t uid, const char *name, const char *value, char *why, size_t why_size) {
+    if (!strcmp(name, "paused")) return set_paused(uid, value, why, why_size);
     if (!config_live(name)) {
         snprintf(why, why_size, "%s applies only when the service starts again: sudo rndis-tether config %s %s",
                  name, name, value);
@@ -328,8 +366,7 @@ static bool change_setting(uid_t uid, const char *name, const char *value, char 
     g.cfg = running;
     g.settings_problem[0] = 0;
     log_verbose = g.cfg.verbose;
-    const struct passwd *user = getpwuid(uid);
-    logmsg("settings: %s = %s, changed by %s", name, value, user ? user->pw_name : "an administrator");
+    logmsg("settings: %s = %s, changed by %s", name, value, user_name(uid));
     session_network_changed(); /* prefer-phone: rank the phone first, or leave the order to macOS */
     return true;
 }

@@ -10,7 +10,7 @@
 #include <stddef.h>
 #include <stdio.h>
 
-#define VERSION "1.0.1"
+#define VERSION "1.1.0"
 #define LABEL "io.github.stlk0.rndis-tether"           /* launchd label and log subsystem */
 #define HELPER_PATH "/Library/PrivilegedHelperTools/" LABEL
 #define PLIST_PATH "/Library/LaunchDaemons/" LABEL ".plist"

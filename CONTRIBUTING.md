@@ -60,8 +60,8 @@ down: lower modules report upwards only through event structs (`ControlEvents`,
 | `src/rndis.c` | Pure RNDIS encoding and parsing, CDC descriptor walk. No I/O. |
 | `src/clock.c`, `src/log.c` | Monotonic time and run-loop timers; logging (unified log under launchd, stderr otherwise) |
 | `src/config.c` | Settings file `/etc/rndis-tether.conf`; `config.h` has the fixed paths and the version |
-| `src/cli.c` | `install`, `uninstall`, `restart`, `status`, `monitor`, `config` |
-| `tests/selftest.c` | Unit tests and a fuzzer for `rndis.c`, BPF records, the settings file, the interface marker |
+| `src/cli.c` | `install`, `uninstall`, `restart`, `status`, `monitor`, `config`, `connect`, `disconnect` |
+| `tests/selftest.c` | Unit tests and a fuzzer for `rndis.c`, BPF records, the settings file, the interface marker, `status` in words |
 | `tests/controltest.c` | `control.c` over a fake USB link |
 | `tests/sessiontest.c` | `datapath.c`, `health.c` over fake USB and control; `status.c`, `admin.c`, `runtime.c` over real sockets |
 | `tests/bpftest.c` | Root-only BPF diagnostic (`make bpf-feth-test`) |
@@ -106,6 +106,10 @@ Each of these was found the hard way on a real phone.
 - The settings socket is created owner-only and then given to `root:admin` with mode
   0660; every connection is checked with `getpeereid` and `mbr_check_membership`, and
   nothing is read from anyone else. Only settings that apply live are accepted.
+- **Pause is runtime only.** `set paused` (`rndis-tether disconnect`/`connect`) is
+  never written to `/etc/rndis-tether.conf`, and every start of the service begins
+  unpaused: a user without the menu app or a lost `connect` must never be left
+  disconnected for good. While paused, `state=paused` wins over every other state.
 - Nothing in `/var/run` (`root:daemon 0775`) is opened, chmod'ed or chown'ed by name:
   both sockets get their owner and mode in `/var/db/rndis-tether` (root only, 0700) and
   are renamed into place. The lock lives there too, mode 0600, so no user can hold it.

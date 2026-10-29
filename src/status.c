@@ -24,8 +24,8 @@ size_t status_format(const StatusReport *r, char *buffer, size_t size) {
     char *at = buffer;
     size_t left = size;
     if (size) buffer[0] = 0;
-    put(&at, &left, "protocol=%d\nversion=%s\npid=%d\nstate=%s\nprefer-phone=%s\n", STATUS_PROTOCOL, VERSION,
-        (int)getpid(), r->state, r->prefer_phone ? "yes" : "no");
+    put(&at, &left, "protocol=%d\nversion=%s\npid=%d\nstate=%s\nprefer-phone=%s\npaused=%s\n", STATUS_PROTOCOL,
+        VERSION, (int)getpid(), r->state, r->prefer_phone ? "yes" : "no", r->paused ? "yes" : "no");
     if (r->phone) put(&at, &left, "phone=%s\n", r->phone);
     const SessionStatus *s = r->session;
     if (s) {

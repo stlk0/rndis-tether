@@ -1,6 +1,7 @@
 /* Offline tests for rndis.c, the BPF record parser, the settings file, the interface
- * marker and device text. No USB, network or root.
+ * marker, device text and the status in words (cli.c). No USB, network or root.
  * Built with UBSan + Guard Malloc by `make check`. */
+#include "cli.h"
 #include "config.h"
 #include "log.h"
 #include "netif.h"
@@ -606,6 +607,37 @@ static void test_interface_marker(void) {
     unlink(path);
 }
 
+/* cli_print_status's words for the daemon's lines, captured from stdout. */
+static const char *status_words(const char *lines, char *out, size_t size) {
+    char path[] = "/tmp/rndis-tether-selftest-XXXXXX";
+    int fd = mkstemp(path), saved = dup(STDOUT_FILENO);
+    CHECK(fd >= 0 && saved >= 0);
+    fflush(stdout);
+    dup2(fd, STDOUT_FILENO);
+    cli_print_status(lines, -1, -1);
+    fflush(stdout);
+    dup2(saved, STDOUT_FILENO);
+    close(saved);
+    ssize_t n = pread(fd, out, size - 1, 0);
+    out[n > 0 ? n : 0] = 0;
+    close(fd);
+    unlink(path);
+    return out;
+}
+
+static void test_status_words(void) {
+    char text[1024];
+    status_words("protocol=1\nversion=" VERSION "\nstate=paused\npaused=yes\nphone=Phone 04e8:6864\n", text,
+                 sizeof text);
+    CHECK(!strcmp(text, "Phone:    Phone 04e8:6864\nStatus:   disconnected (run: rndis-tether connect)\n"));
+    status_words("protocol=1\nversion=" VERSION "\nstate=paused\npaused=yes\n", text, sizeof text);
+    CHECK(!strcmp(text, "Status:   disconnected (run: rndis-tether connect)\n"));
+    status_words("protocol=1\nversion=" VERSION "\nstate=no-phone\npaused=no\n", text, sizeof text);
+    CHECK(!strncmp(text, "Status:   waiting for a phone\n", 30));
+    status_words("protocol=1\nversion=1.0.1\nstate=no-phone\n", text, sizeof text);
+    CHECK(strstr(text, "The service runs version 1.0.1, this program is " VERSION));
+}
+
 int main(void) {
     test_builders();
     test_control_parsers();
@@ -618,6 +650,7 @@ int main(void) {
     test_config();
     test_device_text();
     test_interface_marker();
+    test_status_words();
     fuzz();
     printf("selftest: %u checks, %u failures\n", tests, failures);
     return failures ? 1 : 0;

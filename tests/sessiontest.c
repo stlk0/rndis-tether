@@ -316,6 +316,11 @@ static void test_status_format(void) {
     status_format(&report, text, sizeof text);
     CHECK(!strncmp(text, "protocol=1\n", 11)); /* readers check it first */
     CHECK(strstr(text, "version=" VERSION "\n") && strstr(text, "state=no-phone\n") && !strstr(text, "\nphone="));
+    CHECK(strstr(text, "\npaused=no\n")); /* always there: clients tell a service that can pause by it */
+    report = (StatusReport){.state = "paused", .paused = true, .phone = "Phone 04e8:6864"};
+    status_format(&report, text, sizeof text);
+    CHECK(strstr(text, "state=paused\n") && strstr(text, "\npaused=yes\n") &&
+          strstr(text, "\nphone=Phone 04e8:6864\n"));
     report = (StatusReport){.state = "retrying", .phone = "Phone 04e8:6864",
                             .problem = "interface is already open by another program"};
     status_format(&report, text, sizeof text);
@@ -500,6 +505,8 @@ static void test_admin_socket(void) {
     fd = admin_connect();
     CHECK(!strcmp(admin_reply(fd, reply, sizeof reply), "")); /* closed after the two-second timeout */
     CHECK(!strcmp(admin_ask("set prefer-phone yes\n", reply, sizeof reply), "ok\n") && set_calls == 4);
+    CHECK(!strcmp(admin_ask("set paused yes\n", reply, sizeof reply), "ok\n") && !strcmp(set_name, "paused"));
+    CHECK(!strcmp(admin_ask("set paused maybe\n", reply, sizeof reply), "error: paused must be yes or no\n"));
     unlink(admin_path);
     CHECK(!rmdir(socket_dir)); /* nothing else was left there */
 }

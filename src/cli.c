@@ -170,14 +170,16 @@ static void print_route(const char *text) {
         printf("Internet: goes through %s; the phone takes over without it (prefer-phone = no)\n", name);
 }
 
-/* down/up < 0: no speed line (one-shot status). */
-static void print_status(const char *text, double down, double up) {
+void cli_print_status(const char *text, double down, double up) {
     char state[32], phone[160], address[32], gateway[32], problem[256], settings[300], version[32];
     field(text, "state", state, sizeof state);
     field(text, "phone", phone, sizeof phone);
     field(text, "problem", problem, sizeof problem);
 
-    if (!strcmp(state, "no-phone")) {
+    if (!strcmp(state, "paused")) {
+        if (phone[0]) printf("Phone:    %s\n", phone);
+        printf("Status:   disconnected (run: rndis-tether connect)\n");
+    } else if (!strcmp(state, "no-phone")) {
         printf("Status:   waiting for a phone\n\n%s", TETHERING_HELP);
     } else if (!strcmp(state, "unsupported")) {
         printf("Phone:    %s\nStatus:   this USB device does not work as USB tethering\n\n"
@@ -243,7 +245,7 @@ int cli_status(bool raw) {
         return 1;
     }
     if (raw) fputs(text, stdout);
-    else print_status(text, -1, -1);
+    else cli_print_status(text, -1, -1);
     return 0;
 }
 
@@ -282,7 +284,7 @@ int cli_monitor(void) {
         strftime(clock, sizeof clock, "%H:%M:%S", &local);
         if (terminal) fputs("\033[H\033[J", stdout); /* home, clear */
         printf("rndis-tether monitor    %s    Ctrl-C to quit\n\n", clock);
-        if (running) print_status(text, down, up);
+        if (running) cli_print_status(text, down, up);
         else print_not_running();
         fflush(stdout);
         struct timespec second = {1, 0};
@@ -290,6 +292,34 @@ int cli_monitor(void) {
     }
     if (terminal) fputs("\033[?25h", stdout);
     putchar('\n');
+    return 0;
+}
+
+int cli_pause(bool paused) {
+    char text[2048], value[8], version[32], phone[160], why[400];
+    if (!status_query(text, sizeof text)) {
+        print_not_running();
+        return 1;
+    }
+    if (!*field(text, "paused", value, sizeof value)) { /* 1.0.x would answer with advice about restarting */
+        printf("The service runs version %s, which cannot %s. Update the service:\n"
+               "  sudo rndis-tether install\n", field(text, "version", version, sizeof version),
+               paused ? "disconnect" : "connect");
+        return 1;
+    }
+    int asked = ask_service("paused", paused ? "yes" : "no", why, sizeof why);
+    if (asked < 0) {
+        print_not_running();
+        return 1;
+    }
+    if (!asked) {
+        fprintf(stderr, "Not changed: %s.\n", why);
+        return 1;
+    }
+    if (paused) puts("Disconnected; the phone can stay plugged in. Use it again with:  rndis-tether connect");
+    else if (*field(text, "phone", phone, sizeof phone))
+        puts("Connecting to the phone; rndis-tether status shows when it is online.");
+    else puts("Connected again: the phone is used as soon as it is plugged in.");
     return 0;
 }
 

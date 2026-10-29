@@ -39,6 +39,8 @@ static int usage(FILE *out, int code) {
           "\n"
           "  rndis-tether status                 is it working, and what to do if not\n"
           "  rndis-tether monitor                live status and speed (Ctrl-C to quit)\n"
+          "  rndis-tether disconnect             stop using the phone; it can stay plugged in\n"
+          "  rndis-tether connect                use the phone again\n"
           "  sudo rndis-tether install           install or update the background service\n"
           "  sudo rndis-tether uninstall         remove the service, its settings and interfaces\n"
           "  rndis-tether config                 show the settings\n"
@@ -89,6 +91,8 @@ int main(int argc, char **argv) {
     if (argc > 2) return usage(stderr, 2);
     if (!strcmp(command, "status")) return cli_status(false);
     if (!strcmp(command, "monitor")) return cli_monitor();
+    if (!strcmp(command, "disconnect")) return cli_pause(true);
+    if (!strcmp(command, "connect")) return cli_pause(false);
     if (!strcmp(command, "install")) return cli_install();
     if (!strcmp(command, "uninstall")) return cli_uninstall();
     if (!strcmp(command, "restart")) return cli_restart();

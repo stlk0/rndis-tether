@@ -13,8 +13,8 @@
 #define STATUS_ACCEPT_BATCH 8u /* connections served per run-loop event */
 
 typedef struct {
-    const char *state;            /* no-phone, unsupported, sleeping, retrying, connecting, online */
-    bool prefer_phone;
+    const char *state;            /* paused, no-phone, unsupported, sleeping, retrying, connecting, online */
+    bool prefer_phone, paused;
     const char *phone;            /* NULL without a phone */
     const char *problem;          /* why the last attempt failed, or NULL */
     const char *settings_problem; /* a bad line in the settings file, or NULL */

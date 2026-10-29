@@ -24,8 +24,8 @@ TEST_CFLAGS = $(CFLAGS) -Isrc -O1 -fno-omit-frame-pointer -fsanitize=undefined -
 GMALLOC = DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib MALLOC_STRICT_SIZE=1
 TESTS = rndis-tether-selftest rndis-tether-controltest rndis-tether-sessiontest
 
-# Pure parsers, the fuzzer, BPF records, the settings file and the interface marker.
-SELFTEST = tests/selftest.c $(addprefix src/,config.c log.c rndis.c netif.c runtime.c)
+# Pure parsers, the fuzzer, BPF records, the settings file, the interface marker and status in words.
+SELFTEST = tests/selftest.c $(addprefix src/,cli.c config.c log.c rndis.c netif.c runtime.c)
 rndis-tether-selftest: $(SELFTEST) $(HEADERS)
 	$(CC) $(TEST_CFLAGS) $(SELFTEST) $(NETIF_FRAMEWORKS) -o $@
 
