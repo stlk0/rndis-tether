@@ -3,8 +3,8 @@
 class RndisTether < Formula
   desc "Use an Android phone's USB tethering as a normal network connection"
   homepage "https://github.com/stlk0/rndis-tether"
-  url "https://github.com/stlk0/rndis-tether/archive/refs/tags/v1.0.1.tar.gz"
-  sha256 "cc7e82dcab5bd83c43ab7817bd7a298c3cdae6c3377f75a8e6a1afe2a2bd5698"
+  url "https://github.com/stlk0/rndis-tether/archive/refs/tags/v1.1.0.tar.gz"
+  sha256 "8f995585836a9f7eada8918f1001d63c746a30fc3a1e5efb9e7916970f148603"
   license "MIT"
   head "https://github.com/stlk0/rndis-tether.git", branch: "main"
 
