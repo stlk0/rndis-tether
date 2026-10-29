@@ -20,6 +20,7 @@
 #include <unistd.h>
 
 #define COMMAND_LINK "/usr/local/bin/rndis-tether"
+#define PAUSE_DENIED "only administrators of this Mac can disconnect or connect the phone"
 #define LOG_HINT "/usr/bin/log show --last 30m --style compact --predicate 'subsystem == \"" LABEL "\"'"
 
 /* ------------------------------------------------------------ talking to the daemon */
@@ -171,7 +172,8 @@ static void print_route(const char *text) {
         printf("Internet: goes through %s; the phone takes over without it (prefer-phone = no)\n", name);
 }
 
-void cli_print_status(const char *text, double down, double up) {
+/* down/up < 0: no speed line (one-shot status). */
+static void print_status(const char *text, double down, double up) {
     char state[32], phone[160], address[32], gateway[32], problem[256], settings[300], version[32];
     field(text, "state", state, sizeof state);
     field(text, "phone", phone, sizeof phone);
@@ -246,7 +248,7 @@ int cli_status(bool raw) {
         return 1;
     }
     if (raw) fputs(text, stdout);
-    else cli_print_status(text, -1, -1);
+    else print_status(text, -1, -1);
     return 0;
 }
 
@@ -285,7 +287,7 @@ int cli_monitor(void) {
         strftime(clock, sizeof clock, "%H:%M:%S", &local);
         if (terminal) fputs("\033[H\033[J", stdout); /* home, clear */
         printf("rndis-tether monitor    %s    Ctrl-C to quit\n\n", clock);
-        if (running) cli_print_status(text, down, up);
+        if (running) print_status(text, down, up);
         else print_not_running();
         fflush(stdout);
         struct timespec second = {1, 0};
@@ -296,49 +298,24 @@ int cli_monitor(void) {
     return 0;
 }
 
-const char *cli_pause_message(const char *status, bool paused, int asked, const char *why, int *code) {
-    static char message[600];
-    char value[8], version[32], state[32];
-    *code = 1;
-    if (asked == CLI_NOT_ASKED) {
-        if (!*field(status, "paused", value, sizeof value)) { /* 1.0.x would answer with advice about restarting */
-            snprintf(message, sizeof message, "The service runs version %s, which cannot %s. Update the service:\n"
-                     "  sudo rndis-tether install\n", field(status, "version", version, sizeof version),
-                     paused ? "disconnect" : "connect");
-            return message;
-        }
-        *code = 0;
-        if (paused == !strcmp(value, "yes")) return paused ? "Already disconnected.\n" : "Already connected.\n";
-        return NULL;
-    }
-    if (asked < 0) return "The service did not answer. Its log:\n  " LOG_HINT "\n";
-    if (!asked) {
-        snprintf(message, sizeof message, "Not changed: %s.\n", why);
-        return message;
-    }
-    *code = 0;
-    if (paused) return "Disconnected; the phone can stay plugged in. Use it again with:  rndis-tether connect\n";
-    field(status, "state", state, sizeof state);
-    if (!strcmp(state, "connecting")) return "Connecting to the phone; rndis-tether status shows when it is online.\n";
-    if (!strcmp(state, "no-phone")) return "Connected again: the phone is used as soon as it is plugged in.\n";
-    return "Connected again; rndis-tether status shows the details.\n";
-}
-
 int cli_pause(bool paused) {
-    char before[2048], after[2048], why[400] = "";
-    int code;
-    if (!status_query(before, sizeof before)) {
+    char text[2048], value[8], why[400];
+    if (!status_query(text, sizeof text)) {
         print_not_running();
         return 1;
     }
-    const char *message = cli_pause_message(before, paused, CLI_NOT_ASKED, why, &code);
-    if (!message) {
-        int asked = ask_service("paused", paused ? "yes" : "no", CLI_PAUSE_DENIED, why, sizeof why);
-        if (asked <= 0 || !status_query(after, sizeof after)) after[0] = 0; /* the state right after it */
-        message = cli_pause_message(after, paused, asked, why, &code);
+    if (!*field(text, "paused", value, sizeof value)) { /* 1.0.x would answer with advice about restarting */
+        fprintf(stderr, "The service runs version %s, which cannot %s. Update the service:\n"
+                "  sudo rndis-tether install\n", field(text, "version", value, sizeof value),
+                paused ? "disconnect" : "connect");
+        return 1;
     }
-    fputs(message, code ? stderr : stdout);
-    return code;
+    int asked = ask_service("paused", paused ? "yes" : "no", PAUSE_DENIED, why, sizeof why);
+    if (asked < 0) fputs("The service did not answer. Its log:\n  " LOG_HINT "\n", stderr);
+    else if (!asked) fprintf(stderr, "Not changed: %s.\n", why);
+    else if (paused) puts("Disconnected; the phone can stay plugged in. Use it again with:  rndis-tether connect");
+    else puts("Connected again; rndis-tether status shows the details.");
+    return asked > 0 ? 0 : 1;
 }
 
 /* ---------------------------------------------------------------- service control */

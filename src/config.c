@@ -30,8 +30,8 @@ bool config_interface_valid(const char *name) {
     return true;
 }
 
-static bool set_bool(bool *flag, const char *name, const char *value, char *why, size_t why_size) {
-    if (parse_bool(value, flag)) return true;
+bool config_parse_bool(const char *name, const char *value, bool *out, char *why, size_t why_size) {
+    if (parse_bool(value, out)) return true;
     snprintf(why, why_size, "%s must be yes or no, not \"%s\"", name, value);
     return false;
 }
@@ -46,9 +46,9 @@ static bool set_interface(char *interface, const char *name, const char *value, 
 }
 
 bool config_set(Config *c, const char *name, const char *value, char *why, size_t why_size) {
-    if (!strcmp(name, "prefer-phone")) return set_bool(&c->prefer_phone, name, value, why, why_size);
-    if (!strcmp(name, "ipv6")) return set_bool(&c->ipv6, name, value, why, why_size);
-    if (!strcmp(name, "verbose")) return set_bool(&c->verbose, name, value, why, why_size);
+    if (!strcmp(name, "prefer-phone")) return config_parse_bool(name, value, &c->prefer_phone, why, why_size);
+    if (!strcmp(name, "ipv6")) return config_parse_bool(name, value, &c->ipv6, why, why_size);
+    if (!strcmp(name, "verbose")) return config_parse_bool(name, value, &c->verbose, why, why_size);
     if (!strcmp(name, "host-interface")) return set_interface(c->host, name, value, why, why_size);
     if (!strcmp(name, "peer-interface")) return set_interface(c->peer, name, value, why, why_size);
     if (!strcmp(name, "tx-batch")) {

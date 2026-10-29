@@ -61,7 +61,7 @@ down: lower modules report upwards only through event structs (`ControlEvents`,
 | `src/clock.c`, `src/log.c` | Monotonic time and run-loop timers; logging (unified log under launchd, stderr otherwise) |
 | `src/config.c` | Settings file `/etc/rndis-tether.conf`; `config.h` has the fixed paths and the version |
 | `src/cli.c` | `install`, `uninstall`, `restart`, `status`, `monitor`, `config`, `connect`, `disconnect` |
-| `tests/selftest.c` | Unit tests and a fuzzer for `rndis.c`, BPF records, the settings file, the interface marker, `status` in words |
+| `tests/selftest.c` | Unit tests and a fuzzer for `rndis.c`, BPF records, the settings file, the interface marker |
 | `tests/controltest.c` | `control.c` over a fake USB link |
 | `tests/sessiontest.c` | `datapath.c`, `health.c` over fake USB and control; `status.c`, `admin.c`, `runtime.c` over real sockets |
 | `tests/bpftest.c` | Root-only BPF diagnostic (`make bpf-feth-test`) |

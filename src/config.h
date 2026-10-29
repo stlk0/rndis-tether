@@ -33,6 +33,8 @@ typedef struct {
 void config_defaults(Config *c);
 /* One setting by its file name ("prefer-phone", "tx-batch", ...). */
 bool config_set(Config *c, const char *name, const char *value, char *why, size_t why_size);
+/* yes/no (also true/false, on/off, 1/0); false and why naming name otherwise. */
+bool config_parse_bool(const char *name, const char *value, bool *out, char *why, size_t why_size);
 /* A name for host-interface or peer-interface: fethN. */
 bool config_interface_valid(const char *name);
 /* Settings that cannot go together (both interfaces with one name). */

@@ -37,13 +37,6 @@ bool admin_allowed(uid_t uid, gid_t gid) {
                         !mbr_check_membership(user, group, &member) && member);
 }
 
-bool admin_yes_no(const char *name, const char *value, bool *out, char *why, size_t why_size) {
-    *out = !strcmp(value, "yes");
-    if (*out || !strcmp(value, "no")) return true;
-    snprintf(why, why_size, "%s must be yes or no, not \"%s\"", name, value);
-    return false;
-}
-
 static void close_connection(void *context) {
     close((int)(intptr_t)context);
 }

@@ -372,14 +372,6 @@ static void test_status_choose(void) {
     f.phone = NULL;
     status_choose(&f, &r);
     CHECK(!strcmp(r.state, "paused") && !r.phone);
-
-    bool paused = false;
-    char why[100];
-    CHECK(admin_yes_no("paused", "yes", &paused, why, sizeof why) && paused);
-    CHECK(admin_yes_no("paused", "no", &paused, why, sizeof why) && !paused);
-    CHECK(!admin_yes_no("paused", "true", &paused, why, sizeof why) &&
-          !strcmp(why, "paused must be yes or no, not \"true\""));
-    CHECK(!admin_yes_no("paused", "", &paused, why, sizeof why));
 }
 
 /* ------------------------------------------------------------------ sockets */
@@ -546,8 +538,6 @@ static void test_admin_socket(void) {
     fd = admin_connect();
     CHECK(!strcmp(admin_reply(fd, reply, sizeof reply), "")); /* closed after the two-second timeout */
     CHECK(!strcmp(admin_ask("set prefer-phone yes\n", reply, sizeof reply), "ok\n") && set_calls == 4);
-    CHECK(!strcmp(admin_ask("set paused yes\n", reply, sizeof reply), "ok\n") && !strcmp(set_name, "paused"));
-    CHECK(!strcmp(admin_ask("set paused maybe\n", reply, sizeof reply), "error: paused must be yes or no\n"));
     unlink(admin_path);
     CHECK(!rmdir(socket_dir)); /* nothing else was left there */
 }

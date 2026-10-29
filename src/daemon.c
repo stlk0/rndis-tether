@@ -134,6 +134,13 @@ static void connect_phone(void) {
     schedule_retry(quiet);
 }
 
+/* A phone just plugged in, or usable again after a pause: a fresh start in a second. */
+static void connect_soon(void) {
+    g.attempts = g.failure_repeats = g.init_failures = 0;
+    g.last_failure[0] = 0;
+    if (may_connect()) timer_set(g.retry_timer, 1.0); /* let the data interface and the phone settle */
+}
+
 static void retry_fired(CFRunLoopTimerRef timer, void *info) {
     (void)timer;
     (void)info;
@@ -219,9 +226,7 @@ static void device_matched(void *refcon, io_iterator_t iterator) {
             logmsg("warning: no removal notifications for this device (0x%08x)", interest);
         }
         logmsg("USB tethering detected: %s", g.device_name);
-        g.attempts = g.failure_repeats = g.init_failures = 0;
-        g.last_failure[0] = 0;
-        if (may_connect()) timer_set(g.retry_timer, 1.0); /* let the data interface and the phone settle */
+        connect_soon();
     }
 }
 
@@ -333,7 +338,7 @@ static void pause_now(void *context) {
  * a phone that is plugged in, as when it was plugged in. */
 static bool set_paused(uid_t uid, const char *value, char *why, size_t why_size) {
     bool paused;
-    if (!admin_yes_no("paused", value, &paused, why, why_size)) return false;
+    if (!config_parse_bool("paused", value, &paused, why, why_size)) return false;
     if (paused == g.paused) return true;
     g.paused = paused;
     logmsg("%s by %s", paused ? "paused" : "resumed", user_name(uid));
@@ -341,9 +346,7 @@ static bool set_paused(uid_t uid, const char *value, char *why, size_t why_size)
         timer_disarm(g.retry_timer);
         dispatch_async_f(dispatch_get_main_queue(), NULL, pause_now);
     } else if (g.device && !session_active()) {
-        g.attempts = g.failure_repeats = g.init_failures = 0;
-        g.last_failure[0] = 0;
-        if (may_connect()) timer_set(g.retry_timer, 1.0);
+        connect_soon();
     }
     return true;
 }

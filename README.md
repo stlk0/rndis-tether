@@ -91,9 +91,9 @@ rndis-tether disconnect
 
 `status` then shows *disconnected*. To use the phone again: `rndis-tether connect`.
 Administrators of the Mac need no `sudo` for either; other users get a message that only
-an administrator can disconnect or connect the phone. This is not saved: whenever the
-service starts again (the Mac restarts, an update or `install`, `restart`, or a
-`sudo rndis-tether config` change that restarts it), rndis-tether connects as usual.
+an administrator can disconnect or connect the phone. This is not saved: after a restart
+of the service (for example when the Mac restarts or the service is updated),
+rndis-tether connects as usual.
 
 ## Settings
 
@@ -292,14 +292,12 @@ set paused yes           ->   ok
 
 Of the settings, only `prefer-phone` and `verbose` can be set this way; the service
 applies them at once and saves them in `/etc/rndis-tether.conf`. `paused` is not a
-setting and is never saved.
+setting: it is never saved, and every start of the service begins with `paused=no`.
 
 `set paused yes` disconnects the phone as unplugging would (the network interfaces go
 away) and keeps the service from connecting again, also when a phone is plugged in or
 the Mac wakes; `set paused no` connects a phone that is plugged in. Setting the value it
 already has just answers `ok`. This is what `rndis-tether disconnect` and `connect` do.
-Every start of the service (the Mac starting, `install`, `restart`, a restart after a
-crash) begins with `paused=no`.
 
 ### Logs
 

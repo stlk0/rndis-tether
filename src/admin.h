@@ -16,8 +16,6 @@
 /* Applies one setting for user uid; false and why when it is refused. */
 typedef bool (*AdminSet)(uid_t uid, const char *name, const char *value, char *why, size_t why_size);
 
-/* Exactly yes or no, for a command that is not a setting (`set paused`); false and why. */
-bool admin_yes_no(const char *name, const char *value, bool *out, char *why, size_t why_size);
 /* Root, or a member of group gid. */
 bool admin_allowed(uid_t uid, gid_t gid);
 /* Creates the socket at path for root and group gid, prepared in dir (runtime.h);

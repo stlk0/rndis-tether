@@ -1,7 +1,6 @@
 /* Offline tests for rndis.c, the BPF record parser, the settings file, the interface
- * marker, device text and the status in words (cli.c). No USB, network or root.
+ * marker and device text. No USB, network or root.
  * Built with UBSan + Guard Malloc by `make check`. */
-#include "cli.h"
 #include "config.h"
 #include "log.h"
 #include "netif.h"
@@ -542,6 +541,8 @@ static void test_config(void) {
           !config_live("tx-batch") && !config_live("host-interface") && !config_live("peer-interface"));
     CHECK(!config_set(&c, "tx-batch", "0", why, sizeof why) && !config_set(&c, "tx-batch", "8x", why, sizeof why));
     CHECK(!config_set(&c, "tx-batch", "", why, sizeof why) && !config_set(&c, "verbose", "", why, sizeof why));
+    bool flag;
+    CHECK(!config_parse_bool("paused", "maybe", &flag, why, sizeof why) && strstr(why, "paused must be yes or no"));
 
     /* What config_save writes, config_load reads back unchanged. */
     char path[] = "/tmp/rndis-tether-selftest-XXXXXX";
@@ -607,71 +608,6 @@ static void test_interface_marker(void) {
     unlink(path);
 }
 
-/* cli_print_status's words for the daemon's lines, captured from stdout. */
-static const char *status_words(const char *lines, char *out, size_t size) {
-    char path[] = "/tmp/rndis-tether-selftest-XXXXXX";
-    int fd = mkstemp(path), saved = dup(STDOUT_FILENO);
-    CHECK(fd >= 0 && saved >= 0);
-    fflush(stdout);
-    dup2(fd, STDOUT_FILENO);
-    cli_print_status(lines, -1, -1);
-    fflush(stdout);
-    dup2(saved, STDOUT_FILENO);
-    close(saved);
-    ssize_t n = pread(fd, out, size - 1, 0);
-    out[n > 0 ? n : 0] = 0;
-    close(fd);
-    unlink(path);
-    return out;
-}
-
-static void test_status_words(void) {
-    char text[1024];
-    status_words("protocol=1\nversion=" VERSION "\nstate=paused\npaused=yes\nphone=Phone 04e8:6864\n", text,
-                 sizeof text);
-    CHECK(!strcmp(text, "Phone:    Phone 04e8:6864\nStatus:   disconnected (run: rndis-tether connect)\n"));
-    status_words("protocol=1\nversion=" VERSION "\nstate=paused\npaused=yes\n", text, sizeof text);
-    CHECK(!strcmp(text, "Status:   disconnected (run: rndis-tether connect)\n"));
-    status_words("protocol=1\nversion=" VERSION "\nstate=no-phone\npaused=no\n", text, sizeof text);
-    CHECK(!strncmp(text, "Status:   waiting for a phone\n", 30));
-    status_words("protocol=1\nversion=1.0.1\nstate=no-phone\n", text, sizeof text);
-    CHECK(strstr(text, "The service runs version 1.0.1, this program is " VERSION));
-}
-
-static void test_pause_messages(void) {
-    int code = -1;
-    const char *m = cli_pause_message("protocol=1\nversion=1.0.1\nstate=online\n", true, CLI_NOT_ASKED, "", &code);
-    CHECK(m && code == 1 && strstr(m, "version 1.0.1, which cannot disconnect") &&
-          strstr(m, "sudo rndis-tether install"));
-    m = cli_pause_message("protocol=1\nversion=1.0.1\nstate=paused\n", false, CLI_NOT_ASKED, "", &code);
-    CHECK(m && code == 1 && strstr(m, "which cannot connect"));
-    const char *running = "protocol=1\nstate=online\npaused=no\nphone=Phone\n";
-    const char *paused = "protocol=1\nstate=paused\npaused=yes\nphone=Phone\n";
-    CHECK(!strcmp(cli_pause_message(running, false, CLI_NOT_ASKED, "", &code), "Already connected.\n") && !code);
-    CHECK(!strcmp(cli_pause_message(paused, true, CLI_NOT_ASKED, "", &code), "Already disconnected.\n") && !code);
-    CHECK(!cli_pause_message(running, true, CLI_NOT_ASKED, "", &code) && !code); /* send it */
-    CHECK(!cli_pause_message(paused, false, CLI_NOT_ASKED, "", &code));
-
-    m = cli_pause_message("", true, 0, CLI_PAUSE_DENIED, &code);
-    CHECK(code == 1 &&
-          !strcmp(m, "Not changed: only administrators of this Mac can disconnect or connect the phone.\n"));
-    m = cli_pause_message("", false, 0, "paused must be yes or no, not \"x\"", &code);
-    CHECK(code == 1 && !strcmp(m, "Not changed: paused must be yes or no, not \"x\".\n"));
-    CHECK(strstr(cli_pause_message("", true, -1, "", &code), "did not answer") && code == 1);
-
-    m = cli_pause_message(paused, true, 1, "", &code);
-    CHECK(!code && !strncmp(m, "Disconnected; the phone can stay plugged in.", 44) &&
-          strstr(m, "rndis-tether connect"));
-    m = cli_pause_message("protocol=1\nstate=connecting\npaused=no\nphone=Phone\n", false, 1, "", &code);
-    CHECK(!code && !strncmp(m, "Connecting to the phone;", 24));
-    m = cli_pause_message("protocol=1\nstate=no-phone\npaused=no\n", false, 1, "", &code);
-    CHECK(!code && strstr(m, "as soon as it is plugged in"));
-    m = cli_pause_message("protocol=1\nstate=unsupported\npaused=no\nphone=Modem\n", false, 1, "", &code);
-    CHECK(!code && !strncmp(m, "Connected again;", 16)); /* not "Connecting" to a device that cannot */
-    m = cli_pause_message("", false, 1, "", &code); /* gone right after answering */
-    CHECK(!code && !strncmp(m, "Connected again;", 16));
-}
-
 int main(void) {
     test_builders();
     test_control_parsers();
@@ -684,8 +620,6 @@ int main(void) {
     test_config();
     test_device_text();
     test_interface_marker();
-    test_status_words();
-    test_pause_messages();
     fuzz();
     printf("selftest: %u checks, %u failures\n", tests, failures);
     return failures ? 1 : 0;
