@@ -121,9 +121,10 @@ Each of these was found the hard way on a real phone.
 ## Tested so far
 
 Samsung Galaxy S25 on an Intel Mac with macOS 26: connecting, unplugging, sleep and
-wake, Wi-Fi on and off, VPN (Tailscale), settings changed live, sustained load. Not yet
-tested: Apple silicon, phones with the CDC-style `02/02/ff` interface, the phone's RESET
-and link up/down indications.
+wake, Wi-Fi on and off, VPN (Tailscale), settings changed live, sustained load.
+Connecting and browsing also checked on an Apple silicon Mac and with a OnePlus 7 Pro.
+Not yet tested: phones with the CDC-style `02/02/ff` interface, the phone's RESET and
+link up/down indications.
 
 ## Releasing
 

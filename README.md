@@ -7,6 +7,8 @@ the phone, turn on USB tethering, and the Mac is online, as if you had plugged i
 network cable. It starts by itself, survives sleep, unplugging and restarts, and needs
 no window or menu.
 
+![rndis-tether monitor: a Galaxy S25 is plugged in, connects within seconds and runs a speed test at about 500 Mbit/s](docs/demo.gif)
+
 ## What you need
 
 - A Mac with **macOS 13 Ventura or newer** (Apple silicon or Intel).
@@ -156,6 +158,12 @@ Homebrew, then also run `brew uninstall rndis-tether`.
 
 ## Technical details
 
+### Why not HoRNDIS?
+
+HoRNDIS used to be the answer, but it is a kernel extension that does not run on Apple
+silicon Macs, and its last release was in 2018. rndis-tether is an ordinary program:
+nothing goes into the kernel, and no security settings need changing.
+
 ### How it works
 
 ```
@@ -295,8 +303,8 @@ Security problems: please report them privately, see [SECURITY.md](SECURITY.md).
 - Only phones that use RNDIS for USB tethering. Some newer phones can also use CDC NCM,
   which macOS supports natively: such a phone works without rndis-tether, and
   `rndis-tether list` does not show it.
-- Tested with a Samsung Galaxy S25 on an Intel Mac with macOS 26. Reports about other
-  phones and Macs are welcome.
+- Tested with a Samsung Galaxy S25 and a OnePlus 7 Pro, on Apple silicon and Intel Macs.
+  Reports about other phones and Macs are welcome.
 
 ### Credits
 
