@@ -90,8 +90,10 @@ rndis-tether disconnect
 ```
 
 `status` then shows *disconnected*. To use the phone again: `rndis-tether connect`.
-Administrators of the Mac need no `sudo` for either. This is not saved: when the Mac
-restarts, rndis-tether connects again as usual.
+Administrators of the Mac need no `sudo` for either; other users get a message that only
+an administrator can disconnect or connect the phone. This is not saved: whenever the
+service starts again (the Mac restarts, an update or `install`, `restart`, or a
+`sudo rndis-tether config` change that restarts it), rndis-tether connects as usual.
 
 ## Settings
 
@@ -274,7 +276,8 @@ names you do not know.
 | `settings-problem` | A line in the settings file that could not be read |
 
 `state=paused` comes before every other state: while paused there is no connection,
-with or without a phone. Speed is the difference between two readings of
+with or without a phone. `state` may gain new values; treat an unknown one as not
+connected and show it as is. Speed is the difference between two readings of
 `rx-bytes`/`tx-bytes`; the counters start from zero with every connection.
 
 **Settings**, `/var/run/rndis-tether-admin.sock`, owned by `root:admin` with mode `0660`:
@@ -287,15 +290,16 @@ set verbose maybe        ->   error: verbose must be yes or no, not "maybe"
 set paused yes           ->   ok
 ```
 
-Only `prefer-phone` and `verbose` can be set this way. The service applies the change
-at once and saves it in `/etc/rndis-tether.conf`.
+Of the settings, only `prefer-phone` and `verbose` can be set this way; the service
+applies them at once and saves them in `/etc/rndis-tether.conf`. `paused` is not a
+setting and is never saved.
 
 `set paused yes` disconnects the phone as unplugging would (the network interfaces go
 away) and keeps the service from connecting again, also when a phone is plugged in or
 the Mac wakes; `set paused no` connects a phone that is plugged in. Setting the value it
 already has just answers `ok`. This is what `rndis-tether disconnect` and `connect` do.
-It is never saved: every start of the service (the Mac starting, `install`, a restart
-after a crash) begins with `paused=no`.
+Every start of the service (the Mac starting, `install`, `restart`, a restart after a
+crash) begins with `paused=no`.
 
 ### Logs
 

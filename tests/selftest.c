@@ -638,6 +638,40 @@ static void test_status_words(void) {
     CHECK(strstr(text, "The service runs version 1.0.1, this program is " VERSION));
 }
 
+static void test_pause_messages(void) {
+    int code = -1;
+    const char *m = cli_pause_message("protocol=1\nversion=1.0.1\nstate=online\n", true, CLI_NOT_ASKED, "", &code);
+    CHECK(m && code == 1 && strstr(m, "version 1.0.1, which cannot disconnect") &&
+          strstr(m, "sudo rndis-tether install"));
+    m = cli_pause_message("protocol=1\nversion=1.0.1\nstate=paused\n", false, CLI_NOT_ASKED, "", &code);
+    CHECK(m && code == 1 && strstr(m, "which cannot connect"));
+    const char *running = "protocol=1\nstate=online\npaused=no\nphone=Phone\n";
+    const char *paused = "protocol=1\nstate=paused\npaused=yes\nphone=Phone\n";
+    CHECK(!strcmp(cli_pause_message(running, false, CLI_NOT_ASKED, "", &code), "Already connected.\n") && !code);
+    CHECK(!strcmp(cli_pause_message(paused, true, CLI_NOT_ASKED, "", &code), "Already disconnected.\n") && !code);
+    CHECK(!cli_pause_message(running, true, CLI_NOT_ASKED, "", &code) && !code); /* send it */
+    CHECK(!cli_pause_message(paused, false, CLI_NOT_ASKED, "", &code));
+
+    m = cli_pause_message("", true, 0, CLI_PAUSE_DENIED, &code);
+    CHECK(code == 1 &&
+          !strcmp(m, "Not changed: only administrators of this Mac can disconnect or connect the phone.\n"));
+    m = cli_pause_message("", false, 0, "paused must be yes or no, not \"x\"", &code);
+    CHECK(code == 1 && !strcmp(m, "Not changed: paused must be yes or no, not \"x\".\n"));
+    CHECK(strstr(cli_pause_message("", true, -1, "", &code), "did not answer") && code == 1);
+
+    m = cli_pause_message(paused, true, 1, "", &code);
+    CHECK(!code && !strncmp(m, "Disconnected; the phone can stay plugged in.", 44) &&
+          strstr(m, "rndis-tether connect"));
+    m = cli_pause_message("protocol=1\nstate=connecting\npaused=no\nphone=Phone\n", false, 1, "", &code);
+    CHECK(!code && !strncmp(m, "Connecting to the phone;", 24));
+    m = cli_pause_message("protocol=1\nstate=no-phone\npaused=no\n", false, 1, "", &code);
+    CHECK(!code && strstr(m, "as soon as it is plugged in"));
+    m = cli_pause_message("protocol=1\nstate=unsupported\npaused=no\nphone=Modem\n", false, 1, "", &code);
+    CHECK(!code && !strncmp(m, "Connected again;", 16)); /* not "Connecting" to a device that cannot */
+    m = cli_pause_message("", false, 1, "", &code); /* gone right after answering */
+    CHECK(!code && !strncmp(m, "Connected again;", 16));
+}
+
 int main(void) {
     test_builders();
     test_control_parsers();
@@ -651,6 +685,7 @@ int main(void) {
     test_device_text();
     test_interface_marker();
     test_status_words();
+    test_pause_messages();
     fuzz();
     printf("selftest: %u checks, %u failures\n", tests, failures);
     return failures ? 1 : 0;

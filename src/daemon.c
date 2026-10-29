@@ -297,19 +297,21 @@ static void watch_signal(unsigned slot, int signal_number) {
 static size_t status_report(char *buffer, size_t size) {
     SessionStatus session;
     bool active = session_status(&session);
-    const char *state = g.paused ? "paused" : !g.device ? "no-phone" : g.device_rejected ? "unsupported" :
-                        g.sleeping ? "sleeping" :
-                        active ? (session.address[0] ? "online" : "connecting") :
-                        g.last_failure[0] ? "retrying" : "connecting";
-    StatusReport report = {
-        .state = state,
-        .prefer_phone = g.cfg.prefer_phone,
+    /* While paused no retry notices a phone whose removal notification was lost. */
+    bool phone = g.device && !(g.paused && device_gone());
+    StatusFacts facts = {
+        .phone = phone ? g.device_name : NULL,
+        .rejected = g.device_rejected,
+        .sleeping = g.sleeping,
         .paused = g.paused,
-        .phone = g.device ? g.device_name : NULL,
-        .problem = g.device && !active && !g.paused && g.last_failure[0] ? g.last_failure : NULL,
-        .settings_problem = g.settings_problem[0] ? g.settings_problem : NULL,
+        .last_failure = g.last_failure,
         .session = active ? &session : NULL,
     };
+    StatusReport report = {
+        .prefer_phone = g.cfg.prefer_phone,
+        .settings_problem = g.settings_problem[0] ? g.settings_problem : NULL,
+    };
+    status_choose(&facts, &report);
     return status_format(&report, buffer, size);
 }
 
@@ -330,11 +332,8 @@ static void pause_now(void *context) {
  * does (HALT, interfaces removed) and keeps new ones from starting; resuming connects
  * a phone that is plugged in, as when it was plugged in. */
 static bool set_paused(uid_t uid, const char *value, char *why, size_t why_size) {
-    bool paused = !strcmp(value, "yes");
-    if (!paused && strcmp(value, "no")) {
-        snprintf(why, why_size, "paused must be yes or no, not \"%s\"", value);
-        return false;
-    }
+    bool paused;
+    if (!admin_yes_no("paused", value, &paused, why, why_size)) return false;
     if (paused == g.paused) return true;
     g.paused = paused;
     logmsg("%s by %s", paused ? "paused" : "resumed", user_name(uid));

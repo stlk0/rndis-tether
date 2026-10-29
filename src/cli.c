@@ -58,13 +58,14 @@ static bool status_query(char *text, size_t size) {
     return used > 0;
 }
 
-/* A setting the running service applies at once. 1: applied; 0: refused, see why;
- * -1: no service answers, so only the file can change. */
-static int ask_service(const char *name, const char *value, char *why, size_t why_size) {
+/* A setting the running service applies at once. 1: applied; 0: refused, see why
+ * (denied when the caller is not an administrator); -1: no service answers, so only
+ * the file can change. */
+static int ask_service(const char *name, const char *value, const char *denied, char *why, size_t why_size) {
     int fd = connect_service(ADMIN_SOCKET, 5);
     if (fd < 0) {
         if (errno != EACCES) return -1;
-        strlcpy(why, "only administrators of this Mac can change settings", why_size);
+        strlcpy(why, denied, why_size);
         return 0;
     }
     char request[160], reply[400];
@@ -295,32 +296,49 @@ int cli_monitor(void) {
     return 0;
 }
 
-int cli_pause(bool paused) {
-    char text[2048], value[8], version[32], phone[160], why[400];
-    if (!status_query(text, sizeof text)) {
-        print_not_running();
-        return 1;
+const char *cli_pause_message(const char *status, bool paused, int asked, const char *why, int *code) {
+    static char message[600];
+    char value[8], version[32], state[32];
+    *code = 1;
+    if (asked == CLI_NOT_ASKED) {
+        if (!*field(status, "paused", value, sizeof value)) { /* 1.0.x would answer with advice about restarting */
+            snprintf(message, sizeof message, "The service runs version %s, which cannot %s. Update the service:\n"
+                     "  sudo rndis-tether install\n", field(status, "version", version, sizeof version),
+                     paused ? "disconnect" : "connect");
+            return message;
+        }
+        *code = 0;
+        if (paused == !strcmp(value, "yes")) return paused ? "Already disconnected.\n" : "Already connected.\n";
+        return NULL;
     }
-    if (!*field(text, "paused", value, sizeof value)) { /* 1.0.x would answer with advice about restarting */
-        printf("The service runs version %s, which cannot %s. Update the service:\n"
-               "  sudo rndis-tether install\n", field(text, "version", version, sizeof version),
-               paused ? "disconnect" : "connect");
-        return 1;
-    }
-    int asked = ask_service("paused", paused ? "yes" : "no", why, sizeof why);
-    if (asked < 0) {
-        print_not_running();
-        return 1;
-    }
+    if (asked < 0) return "The service did not answer. Its log:\n  " LOG_HINT "\n";
     if (!asked) {
-        fprintf(stderr, "Not changed: %s.\n", why);
+        snprintf(message, sizeof message, "Not changed: %s.\n", why);
+        return message;
+    }
+    *code = 0;
+    if (paused) return "Disconnected; the phone can stay plugged in. Use it again with:  rndis-tether connect\n";
+    field(status, "state", state, sizeof state);
+    if (!strcmp(state, "connecting")) return "Connecting to the phone; rndis-tether status shows when it is online.\n";
+    if (!strcmp(state, "no-phone")) return "Connected again: the phone is used as soon as it is plugged in.\n";
+    return "Connected again; rndis-tether status shows the details.\n";
+}
+
+int cli_pause(bool paused) {
+    char before[2048], after[2048], why[400] = "";
+    int code;
+    if (!status_query(before, sizeof before)) {
+        print_not_running();
         return 1;
     }
-    if (paused) puts("Disconnected; the phone can stay plugged in. Use it again with:  rndis-tether connect");
-    else if (*field(text, "phone", phone, sizeof phone))
-        puts("Connecting to the phone; rndis-tether status shows when it is online.");
-    else puts("Connected again: the phone is used as soon as it is plugged in.");
-    return 0;
+    const char *message = cli_pause_message(before, paused, CLI_NOT_ASKED, why, &code);
+    if (!message) {
+        int asked = ask_service("paused", paused ? "yes" : "no", CLI_PAUSE_DENIED, why, sizeof why);
+        if (asked <= 0 || !status_query(after, sizeof after)) after[0] = 0; /* the state right after it */
+        message = cli_pause_message(after, paused, asked, why, &code);
+    }
+    fputs(message, code ? stderr : stdout);
+    return code;
 }
 
 /* ---------------------------------------------------------------- service control */
@@ -527,7 +545,8 @@ int cli_config(int argc, char **argv) {
         return 2;
     }
     if (config_live(argv[0])) {
-        int asked = ask_service(argv[0], argv[1], why, sizeof why);
+        int asked = ask_service(argv[0], argv[1], "only administrators of this Mac can change settings", why,
+                                sizeof why);
         if (asked > 0) {
             printf("%s = %s: the service applied it at once and saved it in %s.\n", argv[0], argv[1], CONFIG_PATH);
             return 0;

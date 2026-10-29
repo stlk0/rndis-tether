@@ -20,6 +20,17 @@ static void put(char **at, size_t *left, const char *format, ...) {
     *left -= used;
 }
 
+void status_choose(const StatusFacts *f, StatusReport *r) {
+    const SessionStatus *s = f->paused ? NULL : f->session;
+    r->state = f->paused ? "paused" : !f->phone ? "no-phone" : f->rejected ? "unsupported" :
+               f->sleeping ? "sleeping" : s ? (s->address[0] ? "online" : "connecting") :
+               f->last_failure[0] ? "retrying" : "connecting";
+    r->paused = f->paused;
+    r->phone = f->phone;
+    r->problem = f->phone && !s && !f->paused && f->last_failure[0] ? f->last_failure : NULL;
+    r->session = s;
+}
+
 size_t status_format(const StatusReport *r, char *buffer, size_t size) {
     char *at = buffer;
     size_t left = size;

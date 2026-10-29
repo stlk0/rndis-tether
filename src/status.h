@@ -21,6 +21,17 @@ typedef struct {
     const SessionStatus *session; /* NULL without a session */
 } StatusReport;
 
+/* What the daemon knows, before it is turned into a report. */
+typedef struct {
+    const char *phone;            /* NULL without a phone */
+    bool rejected, sleeping, paused;
+    const char *last_failure;     /* why the last attempt failed; "" when it did not */
+    const SessionStatus *session; /* NULL without a session */
+} StatusFacts;
+
+/* Sets state, paused, phone, problem and session of r. Paused comes before every other
+ * state and shows neither a problem nor a session: the teardown follows just after. */
+void status_choose(const StatusFacts *f, StatusReport *r);
 /* Never more than size - 1 bytes; always terminated. */
 size_t status_format(const StatusReport *r, char *buffer, size_t size);
 /* Answers every connection at path with report(); the socket is prepared in dir

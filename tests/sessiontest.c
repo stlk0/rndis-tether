@@ -341,6 +341,47 @@ static void test_status_format(void) {
     CHECK(status_format(&report, tiny, sizeof tiny) == sizeof tiny - 1 && strlen(tiny) == sizeof tiny - 1);
 }
 
+static void test_status_choose(void) {
+    SessionStatus session = {.interface = "feth50", .address = "10.0.0.2"};
+    StatusFacts f = {.phone = "Phone", .last_failure = "", .session = &session};
+    StatusReport r = {0};
+    status_choose(&f, &r);
+    CHECK(!strcmp(r.state, "online") && r.session == &session && !r.paused && !r.problem);
+    session.address[0] = 0;
+    status_choose(&f, &r);
+    CHECK(!strcmp(r.state, "connecting"));
+    f.session = NULL;
+    f.last_failure = "interface is already open by another program";
+    status_choose(&f, &r);
+    CHECK(!strcmp(r.state, "retrying") && r.problem == f.last_failure);
+    f.sleeping = true;
+    status_choose(&f, &r);
+    CHECK(!strcmp(r.state, "sleeping") && r.problem);
+    f.rejected = true;
+    status_choose(&f, &r);
+    CHECK(!strcmp(r.state, "unsupported"));
+    f.phone = NULL;
+    status_choose(&f, &r);
+    CHECK(!strcmp(r.state, "no-phone") && !r.problem && !r.phone);
+    /* Paused wins over everything; the phone stays, the problem and the session do not
+     * (a status read between `set paused yes` and the teardown). */
+    f = (StatusFacts){.phone = "Phone", .rejected = true, .sleeping = true, .paused = true,
+                      .last_failure = "no answer", .session = &session};
+    status_choose(&f, &r);
+    CHECK(!strcmp(r.state, "paused") && r.paused && !strcmp(r.phone, "Phone") && !r.problem && !r.session);
+    f.phone = NULL;
+    status_choose(&f, &r);
+    CHECK(!strcmp(r.state, "paused") && !r.phone);
+
+    bool paused = false;
+    char why[100];
+    CHECK(admin_yes_no("paused", "yes", &paused, why, sizeof why) && paused);
+    CHECK(admin_yes_no("paused", "no", &paused, why, sizeof why) && !paused);
+    CHECK(!admin_yes_no("paused", "true", &paused, why, sizeof why) &&
+          !strcmp(why, "paused must be yes or no, not \"true\""));
+    CHECK(!admin_yes_no("paused", "", &paused, why, sizeof why));
+}
+
 /* ------------------------------------------------------------------ sockets */
 
 static char socket_dir[64], admin_path[96], status_path[96];
@@ -521,6 +562,7 @@ int main(void) {
     test_keepalive();
     test_reset_limits();
     test_status_format();
+    test_status_choose();
     test_runtime();
     test_status_socket();
     test_admin_socket();
