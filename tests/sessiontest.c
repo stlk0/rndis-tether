@@ -462,13 +462,13 @@ static void test_status_socket(void) {
     struct stat st;
     CHECK(!stat(status_path, &st) && (st.st_mode & 0777) == 0666);
 
-    /* A flood waits its turn: one batch per event, one report per batch. */
+    /* A flood waits its turn: at most one batch per event and one report per batch, so
+     * these clients take exactly two reports. When libdispatch delivers the first event
+     * is its own business, so the run loop is run until everyone is answered. */
     enum { CLIENTS = STATUS_ACCEPT_BATCH + 3 };
     int fd[CLIENTS];
     for (unsigned i = 0; i < CLIENTS; ++i) fd[i] = connect_to(status_path);
-    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0, true);
-    CHECK(answered(fd, CLIENTS) == STATUS_ACCEPT_BATCH && reports == 1);
-    for (int i = 0; i < 20 && answered(fd, CLIENTS) < CLIENTS; ++i)
+    for (int i = 0; i < 200 && answered(fd, CLIENTS) < CLIENTS; ++i)
         CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, true);
     CHECK(answered(fd, CLIENTS) == CLIENTS && reports == 2);
     char reply[64];
