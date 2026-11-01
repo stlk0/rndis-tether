@@ -24,7 +24,6 @@
 #define RUNTIME_DIR "/var/db/rndis-tether"
 #define LOCK_PATH RUNTIME_DIR "/lock"                  /* held by the running daemon */
 #define INTERFACES_PATH RUNTIME_DIR "/interfaces"      /* the feth pair this program created */
-#define OLD_LOCK_PATH "/var/run/rndis-tether.lock"     /* 1.0.0; install and uninstall remove it */
 
 #define TX_BATCH_MAX 32u        /* tx-batch: packets per bulk OUT transfer; auto goes up to it */
 #define CONFIG_PROBLEM_SIZE 300 /* a settings problem: a bad line as config_load reports it, or a rejected setting */

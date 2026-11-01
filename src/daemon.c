@@ -36,7 +36,6 @@ static const int STOP_SIGNALS[] = {SIGTERM, SIGINT, SIGHUP};
 static struct {
     Config cfg;
     char settings_problem[CONFIG_PROBLEM_SIZE];
-    dispatch_source_t signals[STOP_SIGNAL_COUNT]; /* live as long as the daemon */
 
     IONotificationPortRef port;
     io_iterator_t matches[USB_MATCHING_KINDS];
@@ -328,14 +327,14 @@ static void on_signal(void *context) {
     CFRunLoopStop(CFRunLoopGetMain());
 }
 
-static dispatch_source_t watch_signal(int signal_number) {
+/* The source is never released: it lives as long as the daemon. */
+static void watch_signal(int signal_number) {
     signal(signal_number, SIG_IGN);
     dispatch_source_t source = dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL, (uintptr_t)signal_number, 0,
                                                       dispatch_get_main_queue());
     dispatch_set_context(source, (void *)(intptr_t)signal_number);
     dispatch_source_set_event_handler_f(source, on_signal);
     dispatch_resume(source);
-    return source;
 }
 
 /* ------------------------------------------------------------------ status */
@@ -461,7 +460,7 @@ int daemon_run(const Config *cfg, const char *settings_problem) {
         logmsg("cannot watch network state (SystemConfiguration)");
         return 1;
     }
-    for (unsigned i = 0; i < STOP_SIGNAL_COUNT; ++i) g.signals[i] = watch_signal(STOP_SIGNALS[i]);
+    for (unsigned i = 0; i < STOP_SIGNAL_COUNT; ++i) watch_signal(STOP_SIGNALS[i]);
     if (!status_serve(RUNTIME_DIR, STATUS_SOCKET, status_report))
         logmsg("warning: no answers for `rndis-tether status`: %s", strerror(errno));
     serve_admin();

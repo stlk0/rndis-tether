@@ -475,9 +475,7 @@ static bool write_plist(char *why, size_t why_size) {
         "        <string>" HELPER_PATH "</string>\n"
         "        <string>run</string>\n"
         "    </array>\n"
-        "    <key>RunAtLoad</key>\n"
-        "    <true/>\n"
-        "    <key>KeepAlive</key>\n"
+        "    <key>KeepAlive</key>\n" /* implies RunAtLoad (launchd.plist(5)) */
         "    <true/>\n"
         "    <key>ThrottleInterval</key>\n"
         "    <integer>10</integer>\n"
@@ -528,7 +526,6 @@ int cli_install(void) {
               "  Stop it with Ctrl-C, then install again.\n", stderr);
         return 1;
     }
-    unlink(OLD_LOCK_PATH);
     if (!install_binary(self, why, sizeof why) || !write_plist(why, sizeof why)) {
         fprintf(stderr, "Installation failed: %s\n", why);
         return 1;
@@ -558,7 +555,6 @@ int cli_uninstall(void) {
     unlink(PLIST_PATH);
     unlink(HELPER_PATH);
     unlink(CONFIG_PATH);
-    unlink(OLD_LOCK_PATH);
     unlink_command();
     /* A foreground `run` still holds the lock: its sockets, interfaces and lock stay,
      * or a second daemon could start next to it. */
