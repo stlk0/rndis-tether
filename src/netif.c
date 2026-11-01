@@ -18,18 +18,24 @@
 #include <time.h>
 #include <unistd.h>
 
+#define CHILD_POLL_US 5000u /* how often the exit status is checked while waiting */
+#define IFCONFIG "/sbin/ifconfig" /* absolute: no PATH lookup as root */
+#define IPCONFIG "/usr/sbin/ipconfig"
+
 static bool spawn_and_wait(const char *const argv[], unsigned timeout_ms, bool quiet) {
     static char *const environment[] = {"PATH=/usr/bin:/bin:/usr/sbin:/sbin", NULL};
     posix_spawn_file_actions_t actions;
     posix_spawnattr_t attributes;
     posix_spawn_file_actions_init(&actions);
     posix_spawnattr_init(&attributes);
-    /* Children get only stdin/stdout/stderr: no USB, BPF or socket descriptors. */
+    /* Ignored signals and the blocked mask survive exec (the daemon ignores its stop
+     * signals and SIGPIPE): the child starts with default handling and nothing blocked. */
     sigset_t all, none;
     sigfillset(&all);
     sigemptyset(&none);
     posix_spawnattr_setsigdefault(&attributes, &all);
     posix_spawnattr_setsigmask(&attributes, &none);
+    /* Children get only stdin/stdout/stderr: no USB, BPF or socket descriptors. */
     posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSIGDEF |
                                               POSIX_SPAWN_SETSIGMASK);
     posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0);
@@ -55,7 +61,7 @@ static bool spawn_and_wait(const char *const argv[], unsigned timeout_ms, bool q
             logmsg("command timed out: %s %s", argv[0], argv[1] ? argv[1] : "");
             return false;
         }
-        usleep(5000);
+        usleep(CHILD_POLL_US);
     }
 }
 
@@ -68,25 +74,25 @@ bool run_command_quiet(const char *const argv[], unsigned timeout_ms) {
 }
 
 static bool run(const char *const argv[]) {
-    return run_command(argv, 5000);
+    return run_command(argv, COMMAND_TIMEOUT_MS);
 }
 
 bool feth_sysctls_ok(char *why, size_t why_size) {
     static const struct { const char *name; long long required; } checks[] = {
-        {"net.link.fake.hwcsum", 0},           /* else checksums are left for "hardware" */
-        {"net.link.fake.fcs", 0},              /* else a frame check sequence is appended */
-        {"net.link.fake.tso_support", 0},      /* else oversized TCP segments reach BPF */
-        {"net.link.fake.lro", 0},
-        {"net.link.fake.trailer_length", 0},
-        {"net.link.fake.separate_frame_header", 0},
-        {"net.link.fake.nxattach", 0},         /* classic BSD path, where BPF sees frames */
-        {"net.link.fake.bsd_mode", 1},
+        {FETH_SYSCTL_PREFIX ".hwcsum", 0},      /* else checksums are left for "hardware" */
+        {FETH_SYSCTL_PREFIX ".fcs", 0},         /* else a frame check sequence is appended */
+        {FETH_SYSCTL_PREFIX ".tso_support", 0}, /* else oversized TCP segments reach BPF */
+        {FETH_SYSCTL_PREFIX ".lro", 0},
+        {FETH_SYSCTL_PREFIX ".trailer_length", 0},
+        {FETH_SYSCTL_PREFIX ".separate_frame_header", 0},
+        {FETH_SYSCTL_PREFIX ".nxattach", 0},    /* classic BSD path, where BPF sees frames */
+        {FETH_SYSCTL_PREFIX ".bsd_mode", 1},
     };
     for (size_t i = 0; i < sizeof checks / sizeof *checks; ++i) {
         uint64_t raw = 0;
         size_t size = sizeof raw;
         if (sysctlbyname(checks[i].name, &raw, &size, NULL, 0) != 0) continue; /* absent on this macOS */
-        long long value = size == 4 ? (long long)(int32_t)(uint32_t)raw : (long long)raw;
+        long long value = size == sizeof(int32_t) ? (long long)(int32_t)(uint32_t)raw : (long long)raw;
         if (value != checks[i].required) {
             snprintf(why, why_size, "%s is %lld, expected %lld", checks[i].name, value, checks[i].required);
             return false;
@@ -101,7 +107,7 @@ bool interface_exists(const char *name) {
 
 void feth_destroy(const char *name) {
     if (!interface_exists(name)) return;
-    const char *argv[] = {"/sbin/ifconfig", name, "destroy", NULL};
+    const char *argv[] = {IFCONFIG, name, "destroy", NULL};
     if (!run(argv)) logmsg("could not destroy %s", name);
 }
 
@@ -113,13 +119,13 @@ bool feth_create_pair(const char *host, const char *peer, unsigned mtu) {
     char mtu_text[8];
     snprintf(mtu_text, sizeof mtu_text, "%u", mtu);
     const char *const steps[][5] = {
-        {"/sbin/ifconfig", host, "create", NULL},
-        {"/sbin/ifconfig", peer, "create", NULL},
-        {"/sbin/ifconfig", host, "peer", peer, NULL},
-        {"/sbin/ifconfig", host, "mtu", mtu_text, NULL},
-        {"/sbin/ifconfig", peer, "mtu", mtu_text, NULL},
-        {"/sbin/ifconfig", peer, "up", NULL},
-        {"/sbin/ifconfig", host, "up", NULL},
+        {IFCONFIG, host, "create", NULL},
+        {IFCONFIG, peer, "create", NULL},
+        {IFCONFIG, host, "peer", peer, NULL},
+        {IFCONFIG, host, "mtu", mtu_text, NULL},
+        {IFCONFIG, peer, "mtu", mtu_text, NULL},
+        {IFCONFIG, peer, "up", NULL},
+        {IFCONFIG, host, "up", NULL},
     };
     for (size_t i = 0; i < sizeof steps / sizeof *steps; ++i) {
         if (!run(steps[i])) {
@@ -151,17 +157,19 @@ int bpf_open_bound(const char *ifname, unsigned *buffer_size, char *why, size_t 
     struct ifreq ifr;
     memset(&ifr, 0, sizeof ifr);
     strlcpy(ifr.ifr_name, ifname, sizeof ifr.ifr_name);
-    const char *step = NULL;
+    const char *step = NULL, *reason = NULL;
     if (ioctl(fd, BIOCSBLEN, &requested)) step = "BIOCSBLEN";              /* must precede BIOCSETIF */
     else if (!set_flag(fd, BIOCSHDRCMPLT, 1)) step = "BIOCSHDRCMPLT";      /* keep our source MAC */
     else if (ioctl(fd, BIOCSETIF, &ifr)) step = "BIOCSETIF";
-    else if (ioctl(fd, BIOCGDLT, &dlt) || dlt != DLT_EN10MB) step = "BIOCGDLT (not Ethernet)";
+    else if (ioctl(fd, BIOCGDLT, &dlt)) step = "BIOCGDLT";
+    else if (dlt != DLT_EN10MB) step = "BIOCGDLT", reason = "not Ethernet";
     else if (!set_flag(fd, BIOCIMMEDIATE, 1)) step = "BIOCIMMEDIATE";
     else if (!set_flag(fd, BIOCSSEESENT, 0)) step = "BIOCSSEESENT";        /* never read back our writes */
-    else if (ioctl(fd, BIOCGBLEN, &actual) || !actual || actual > requested) step = "BIOCGBLEN";
+    else if (ioctl(fd, BIOCGBLEN, &actual)) step = "BIOCGBLEN";
+    else if (!actual || actual > requested) step = "BIOCGBLEN", reason = "unexpected buffer size";
     else if (!set_flag(fd, FIONBIO, 1)) step = "FIONBIO";
     if (step) {
-        snprintf(why, why_size, "%s on %s failed: %s", step, ifname, strerror(errno));
+        snprintf(why, why_size, "%s on %s failed: %s", step, ifname, reason ? reason : strerror(errno));
         close(fd);
         return -1;
     }
@@ -176,7 +184,7 @@ int bpf_open_bound(const char *ifname, unsigned *buffer_size, char *why, size_t 
 #define BIOCSBATCHWRITE _IOW('B', 143, int)
 #endif
 
-bool bpf_batch_write(int fd, bool on) {
+bool bpf_set_batch_write(int fd, bool on) {
     int value = on, check = !on;
     return !ioctl(fd, BIOCSBATCHWRITE, &value) && !ioctl(fd, BIOCGBATCHWRITE, &check) && check == (int)on;
 }
@@ -197,25 +205,26 @@ size_t bpf_put(uint8_t *buffer, size_t used, size_t capacity, const uint8_t *fra
 /* The kernel writes SIZEOF_BPF_HDR (18) bytes, not sizeof(struct bpf_hdr) (20 with padding). */
 #define BPF_HEADER_MIN (offsetof(struct bpf_hdr, bh_hdrlen) + sizeof(((struct bpf_hdr *)0)->bh_hdrlen))
 
-bool bpf_next(BpfCursor *c, const uint8_t **frame, size_t *length, bool *truncated) {
-    struct bpf_hdr h;
-    if (c->n < BPF_HEADER_MIN) return false;
-    memset(&h, 0, sizeof h);
-    memcpy(&h, c->p, BPF_HEADER_MIN);
-    size_t header = h.bh_hdrlen, captured = h.bh_caplen;
-    if (header < BPF_HEADER_MIN || header > c->n || captured > c->n - header) { c->n = 0; return false; }
-    *frame = c->p + header;
+bool bpf_next(BpfCursor *cursor, const uint8_t **frame, size_t *length, bool *truncated) {
+    struct bpf_hdr header;
+    if (cursor->left < BPF_HEADER_MIN) return false;
+    memset(&header, 0, sizeof header);
+    memcpy(&header, cursor->next, BPF_HEADER_MIN);
+    size_t header_length = header.bh_hdrlen, captured = header.bh_caplen;
+    if (header_length < BPF_HEADER_MIN || header_length > cursor->left ||
+        captured > cursor->left - header_length) { cursor->left = 0; return false; }
+    *frame = cursor->next + header_length;
     *length = captured;
-    *truncated = h.bh_caplen != h.bh_datalen;
-    size_t step = BPF_WORDALIGN(header + captured);
-    if (step > c->n) step = c->n;
-    c->p += step;
-    c->n -= step;
+    *truncated = header.bh_caplen != header.bh_datalen;
+    size_t step = BPF_WORDALIGN(header_length + captured);
+    if (step > cursor->left) step = cursor->left;
+    cursor->next += step;
+    cursor->left -= step;
     return true;
 }
 
 bool ipconfig_set(const char *ifname, const char *method) {
-    const char *argv[] = {"/usr/sbin/ipconfig", "set", ifname, method, NULL};
+    const char *argv[] = {IPCONFIG, "set", ifname, method, NULL};
     return run(argv);
 }
 
@@ -241,28 +250,47 @@ bool netstate_watch(void (*changed)(void)) {
     CFRelease(pattern);
     state_changed = changed;
     store = SCDynamicStoreCreate(NULL, CFSTR("rndis-tether"), notified, NULL);
-    CFRunLoopSourceRef source = store && ipv4_patterns &&
-        SCDynamicStoreSetNotificationKeys(store, NULL, ipv4_patterns) ?
-        SCDynamicStoreCreateRunLoopSource(NULL, store, 0) : NULL;
+    if (!store || !ipv4_patterns) return false;
+    if (!SCDynamicStoreSetNotificationKeys(store, NULL, ipv4_patterns)) return false;
+    CFRunLoopSourceRef source = SCDynamicStoreCreateRunLoopSource(NULL, store, 0);
     if (!source) return false;
     CFRunLoopAddSource(CFRunLoopGetMain(), source, kCFRunLoopDefaultMode);
     CFRelease(source);
     return true;
 }
 
-static bool ipv4_text(CFTypeRef value, char out[16]) {
+static bool ipv4_text(CFTypeRef value, char out[INET_ADDRSTRLEN]) {
     struct in_addr parsed;
     return value && CFGetTypeID(value) == CFStringGetTypeID() &&
-           CFStringGetCString((CFStringRef)value, out, 16, kCFStringEncodingASCII) &&
+           CFStringGetCString((CFStringRef)value, out, INET_ADDRSTRLEN, kCFStringEncodingASCII) &&
            inet_pton(AF_INET, out, &parsed) == 1;
 }
 
 typedef struct {
     CFStringRef ifname;
-    char *address, *router, *service;
-    size_t service_size;
+    Lease *lease;
     bool found;
 } LeaseSearch;
+
+#define SERVICE_STATE_PREFIX "State:/Network/Service/" /* service_key builds this; <id>/IPv4 follows */
+
+/* The <id> of State:/Network/Service/<id>/IPv4; false when it does not fit out. */
+static bool service_id_from_key(CFStringRef key, char *out, size_t size) {
+    char path[256];
+    if (!CFStringGetCString(key, path, sizeof path, kCFStringEncodingUTF8)) return false;
+    if (strncmp(path, SERVICE_STATE_PREFIX, strlen(SERVICE_STATE_PREFIX))) return false;
+    const char *id = path + strlen(SERVICE_STATE_PREFIX), *slash = strchr(id, '/');
+    if (!slash || (size_t)(slash - id) >= size) return false;
+    memcpy(out, id, (size_t)(slash - id));
+    out[slash - id] = 0;
+    return true;
+}
+
+static CFTypeRef first_address(CFDictionaryRef ipv4) {
+    CFTypeRef addresses = CFDictionaryGetValue(ipv4, kSCPropNetIPv4Addresses);
+    if (!addresses || CFGetTypeID(addresses) != CFArrayGetTypeID() || !CFArrayGetCount(addresses)) return NULL;
+    return CFArrayGetValueAtIndex(addresses, 0);
+}
 
 /* key: State:/Network/Service/<id>/IPv4 */
 static void lease_match(const void *key, const void *value, void *context) {
@@ -271,30 +299,19 @@ static void lease_match(const void *key, const void *value, void *context) {
     CFDictionaryRef ipv4 = value;
     CFTypeRef name = CFDictionaryGetValue(ipv4, kSCPropInterfaceName);
     if (!name || !CFEqual(name, search->ifname)) return;
-    CFTypeRef addresses = CFDictionaryGetValue(ipv4, kSCPropNetIPv4Addresses);
-    CFTypeRef first = addresses && CFGetTypeID(addresses) == CFArrayGetTypeID() &&
-                      CFArrayGetCount((CFArrayRef)addresses) ?
-                      CFArrayGetValueAtIndex((CFArrayRef)addresses, 0) : NULL;
-    char path[256];
-    const char *prefix = "State:/Network/Service/", *id = NULL, *slash = NULL;
-    if (CFStringGetCString(key, path, sizeof path, kCFStringEncodingUTF8) && !strncmp(path, prefix, strlen(prefix))) {
-        id = path + strlen(prefix);
-        slash = strchr(id, '/');
-    }
-    if (!slash || (size_t)(slash - id) >= search->service_size) return;
-    search->found = ipv4_text(first, search->address) &&
-                    ipv4_text(CFDictionaryGetValue(ipv4, kSCPropNetIPv4Router), search->router);
-    if (search->found) {
-        memcpy(search->service, id, (size_t)(slash - id));
-        search->service[slash - id] = 0;
-    }
+    char id[SERVICE_ID_MAX];
+    if (!service_id_from_key(key, id, sizeof id)) return;
+    /* SC calls the gateway Router. */
+    search->found = ipv4_text(first_address(ipv4), search->lease->address) &&
+                    ipv4_text(CFDictionaryGetValue(ipv4, kSCPropNetIPv4Router), search->lease->gateway);
+    if (search->found) strlcpy(search->lease->service, id, sizeof search->lease->service);
 }
 
-bool lease_get(const char *ifname, char address[16], char router[16], char *service, size_t service_size) {
+bool lease_get(const char *ifname, Lease *lease) {
     if (!store) return false;
     CFDictionaryRef services = SCDynamicStoreCopyMultiple(store, NULL, ipv4_patterns);
     CFStringRef name = CFStringCreateWithCString(NULL, ifname, kCFStringEncodingUTF8);
-    LeaseSearch search = {name, address, router, service, service_size, false};
+    LeaseSearch search = {.ifname = name, .lease = lease};
     if (services && name) CFDictionaryApplyFunction(services, lease_match, &search);
     if (services) CFRelease(services);
     if (name) CFRelease(name);
@@ -317,6 +334,7 @@ bool service_rank_first(const char *service) {
                                               &kCFTypeDictionaryValueCallBacks);
     bool ok = false;
     if (store && key && rank) {
+        /* AddTemporaryValue refuses a key that already exists. */
         (void)SCDynamicStoreRemoveValue(store, key);
         ok = SCDynamicStoreAddTemporaryValue(store, key, rank);
     }

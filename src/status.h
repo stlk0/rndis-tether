@@ -11,9 +11,19 @@
  * New fields do not bump it; readers skip names they do not know. */
 #define STATUS_PROTOCOL 1
 #define STATUS_ACCEPT_BATCH 8u /* connections served per run-loop event */
+#define STATUS_TEXT_SIZE 2048 /* a whole status reply, terminator included */
+
+/* Values of state= in the public status protocol (README). */
+#define STATUS_STATE_PAUSED "paused"
+#define STATUS_STATE_NO_PHONE "no-phone"
+#define STATUS_STATE_UNSUPPORTED "unsupported"
+#define STATUS_STATE_SLEEPING "sleeping"
+#define STATUS_STATE_RETRYING "retrying"
+#define STATUS_STATE_CONNECTING "connecting"
+#define STATUS_STATE_ONLINE "online"
 
 typedef struct {
-    const char *state;            /* paused, no-phone, unsupported, sleeping, retrying, connecting, online */
+    const char *state;            /* one of STATUS_STATE_* */
     bool prefer_phone, paused;
     const char *phone;            /* NULL without a phone */
     const char *problem;          /* why the last attempt failed, or NULL */
@@ -24,7 +34,9 @@ typedef struct {
 /* What the daemon knows, before it is turned into a report. */
 typedef struct {
     const char *phone;            /* NULL without a phone */
-    bool rejected, sleeping, paused;
+    bool rejected; /* the phone in hand is refused (state=unsupported) */
+    bool sleeping; /* the Mac is going to sleep or asleep */
+    bool paused;   /* rndis-tether disconnect; runtime only */
     const char *last_failure;     /* why the last attempt failed; "" when it did not */
     const SessionStatus *session; /* NULL without a session */
 } StatusFacts;

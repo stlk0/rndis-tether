@@ -64,6 +64,7 @@ down: lower modules report upwards only through event structs (`ControlEvents`,
 | `tests/selftest.c` | Unit tests and a fuzzer for `rndis.c`, BPF records, the settings file, the interface marker |
 | `tests/controltest.c` | `control.c` over a fake USB link |
 | `tests/sessiontest.c` | `datapath.c`, `health.c` over fake USB and control; `status.c`, `admin.c`, `runtime.c` over real sockets |
+| `tests/bringuptest.c` | `session.c` with the real control, health and data path over a fake phone, network and interface marker |
 | `tests/bpftest.c` | Root-only BPF diagnostic (`make bpf-feth-test`) |
 | `install.sh` | One-line installer from the latest GitHub release |
 | `packaging/homebrew/` | Formula for the `stlk0/homebrew-tap` repository |
@@ -118,9 +119,13 @@ Each of these was found the hard way on a real phone.
   event: a flood of clients must not starve USB completions and timers.
 - Text from the phone (its USB product name) is reduced to printable ASCII before it
   reaches logs, status lines or a terminal.
-- Only interfaces this program created are destroyed: their names are kept in
-  `/var/db/rndis-tether/interfaces`. A `feth50` made by another program is left alone,
-  and the session reports it.
+- Only interfaces this program created are destroyed or unconfigured (`ipconfig set
+  NONE` in teardown): their names are kept in `/var/db/rndis-tether/interfaces`. A
+  `feth50` made by another program is left alone, and the session reports it
+  (`tests/bringuptest.c`).
+- One phone at a time: the device in hand stays while it is plugged in, also while
+  paused or between retries. It makes room only when it leaves the registry (a
+  re-enumerated phone), is rejected, or is a `02/02/ff` function without a session.
 
 ## Tested so far
 

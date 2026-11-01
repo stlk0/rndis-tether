@@ -7,7 +7,8 @@
 # Optional second argument: powermetrics duration in seconds (default 60).
 # Results: profile/<state>-<time>/ in the repo; summary.txt is the short version.
 # Leak check: run "idle" with the daemon up, do 5 unplug/replug and 2 sleep/wake
-# cycles, run "idle" again and compare ports, files and rss in the two summaries.
+# cycles, run "idle" again and compare ports, open files and mem (top's memory
+# footprint) in the two summaries.
 set -eu
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -16,6 +17,8 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 STATE=${1:?usage: sudo scripts/profile.sh <state> [seconds]}
 DURATION=${2:-60}
+INTERVAL=5        # seconds per top and powermetrics sample
+SAMPLE_SECONDS=10 # call stacks recorded by sample
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT=$ROOT/profile/$STATE-$(date +%Y%m%d-%H%M%S)
 mkdir -p "$OUT"
@@ -48,28 +51,29 @@ note "$(battery)"
 system_profiler SPUSBHostDataType > "$OUT/usb.txt" 2>&1 || true
 
 if [ -n "$PID" ]; then
-    # Second top sample gives rates over 5 s: CPU, idle wakeups, power score.
-    top -l 2 -s 5 -pid "$PID" -stats pid,command,cpu,time,threads,ports,mem,idlew,power > "$OUT/top.txt" 2>&1 || true
-    note "top (5 s): $(grep -E '^ *PID' "$OUT/top.txt" | tail -1 | tr -s ' ')"
+    # Second top sample gives rates over one interval: CPU, idle wakeups, power score.
+    top -l 2 -s "$INTERVAL" -pid "$PID" -stats pid,command,cpu,time,threads,ports,mem,idlew,power > "$OUT/top.txt" 2>&1 || true
+    note "top ($INTERVAL s): $(grep -E '^ *PID' "$OUT/top.txt" | tail -1 | tr -s ' ')"
     note "           $(grep -E "^ *$PID " "$OUT/top.txt" | tail -1 | tr -s ' ')"
     lsof -p "$PID" > "$OUT/files.txt" 2>&1 || true
+    # lsof prints one header line before the files.
     note "open files: $(($(wc -l < "$OUT/files.txt") - 1))"
     leaks "$PID" > "$OUT/leaks.txt" 2>&1 || true
     note "leaks: $(grep -E 'leaks for' "$OUT/leaks.txt" | sed 's/^Process [0-9]*: //' || true)"
-    note "sampling the daemon for 10 s ..."
-    sample "$PID" 10 -file "$OUT/sample.txt" > /dev/null 2>&1 || true
+    note "sampling the daemon for $SAMPLE_SECONDS s ..."
+    sample "$PID" "$SAMPLE_SECONDS" -file "$OUT/sample.txt" > /dev/null 2>&1 || true
 fi
 
-COUNT=$((DURATION / 5))
+COUNT=$((DURATION / INTERVAL))
 [ "$COUNT" -ge 1 ] || COUNT=1
-note "powermetrics: $COUNT x 5 s ..."
+note "powermetrics: $COUNT x $INTERVAL s ..."
 measure() {
     powermetrics --samplers "$1" --show-process-energy --show-process-netstats \
-        -i 5000 -n "$COUNT" > "$OUT/powermetrics.txt" 2>&1
+        -i $((INTERVAL * 1000)) -n "$COUNT" > "$OUT/powermetrics.txt" 2>&1
 }
 measure tasks,cpu_power,smc,thermal || measure tasks,cpu_power,thermal || true
 note "$(grep -iE 'package power|die temperature|fan:|pressure level' "$OUT/powermetrics.txt" | sort | uniq -c | sort -rn | head -12)"
-note "per-process lines (each 5 s sample):"
+note "per-process lines (each $INTERVAL s sample):"
 note "$(grep -m1 -E '^Name +ID' "$OUT/powermetrics.txt" || true)"
 note "$(grep -E '^(io\.github\.stlk0|rndis-tether|kernel_task)' "$OUT/powermetrics.txt" || true)"
 note "$(battery)"

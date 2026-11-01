@@ -22,19 +22,27 @@
 #include <unistd.h>
 
 #define REJECTED_MAX 16u      /* non-RNDIS CDC functions remembered by registry ID */
-#define CDC_INIT_ATTEMPTS 3u  /* a 02/02/ff function that never answers INITIALIZE is not RNDIS */
-#define REPEAT_LOG_EVERY 20u  /* an identical retry failure: about every 10 minutes */
+#define CDC_INIT_ATTEMPTS 3u  /* a 02/02/ff function that never completes INITIALIZE is not RNDIS */
+#define REPEAT_LOG_EVERY 20u  /* an identical retry failure is logged once in this many tries */
+#define STABLE_SESSION_MS 60000u /* a session that lasted this long starts the retry delays over */
+#define RETRY_FIRST_S 1.0    /* the first retry; each next one waits twice as long */
+#define RETRY_MAX_S 30.0     /* retry delays double up to this */
+#define PLUG_SETTLE_S 1.0    /* after plug-in or the end of a pause: the data interface and the phone settle */
+#define WAKE_SETTLE_S 2.0    /* after wake: USB and the phone come back first */
+
+static const int STOP_SIGNALS[] = {SIGTERM, SIGINT, SIGHUP};
+#define STOP_SIGNAL_COUNT (sizeof STOP_SIGNALS / sizeof *STOP_SIGNALS)
 
 static struct {
     Config cfg;
-    char settings_problem[300];
-    dispatch_source_t signals[3];
+    char settings_problem[CONFIG_PROBLEM_SIZE];
+    dispatch_source_t signals[STOP_SIGNAL_COUNT]; /* live as long as the daemon */
 
     IONotificationPortRef port;
-    io_iterator_t matches[2];
+    io_iterator_t matches[USB_MATCHING_KINDS];
     io_service_t device;
     io_object_t device_interest;
-    char device_name[160];
+    char device_name[USB_DESCRIPTION_SIZE];
     uint64_t device_id;
     bool device_cdc, device_rejected;
     unsigned init_failures;
@@ -43,7 +51,9 @@ static struct {
 
     CFRunLoopTimerRef retry_timer;
     unsigned attempts;
-    char last_failure[200]; /* the retry loop logs a repeating failure only now and then */
+    /* The last failure: shown in status, compared to keep repeats out of the log; "" after a
+     * success, a plug-in or the end of a pause. */
+    char last_failure[SESSION_REASON_SIZE];
     unsigned failure_repeats;
 
     io_connect_t power_root;
@@ -60,10 +70,11 @@ static void rescan_devices(void);
 
 /* ------------------------------------------------------------ connecting */
 
-/* A phone that keeps failing the same way (interface held by another program, wrong
- * feth sysctl) is retried every 30 s for as long as it stays plugged in. Log the
- * failure when it changes and then only every REPEAT_LOG_EVERY-th time. */
-static bool failure_worth_logging(const char *reason) {
+/* Records reason as the last failure; true when it should be logged: when it changes,
+ * then only every REPEAT_LOG_EVERY-th time. A phone that keeps failing the same way
+ * (interface held by another program, wrong feth sysctl) is retried at the longest
+ * delay (RETRY_MAX_S) for as long as it stays plugged in. */
+static bool note_failure(const char *reason) {
     if (strcmp(reason, g.last_failure)) {
         strlcpy(g.last_failure, reason, sizeof g.last_failure);
         g.failure_repeats = 0;
@@ -72,13 +83,24 @@ static bool failure_worth_logging(const char *reason) {
     return ++g.failure_repeats % REPEAT_LOG_EVERY == 0;
 }
 
+/* A connection worked, or the phone is new: earlier failures say nothing about the next try. */
+static void forget_failures(void) {
+    g.last_failure[0] = 0;
+    g.failure_repeats = g.init_failures = 0;
+}
+
 static bool may_connect(void) {
     return g.device && !g.device_rejected && !g.sleeping && !g.paused && !g.shutting_down;
 }
 
+static double retry_delay(unsigned attempts) {
+    double delay = RETRY_FIRST_S;
+    for (unsigned i = 0; i < attempts && delay < RETRY_MAX_S; ++i) delay *= 2;
+    return delay < RETRY_MAX_S ? delay : RETRY_MAX_S;
+}
+
 static void schedule_retry(bool quiet) {
-    double delay = g.attempts < 5 ? (double)(1u << g.attempts) : 30.0;
-    ++g.attempts;
+    double delay = retry_delay(g.attempts++);
     if (!may_connect()) return;
     if (!quiet) {
         if (g.failure_repeats) logmsg("next attempt in %.0f s (same failure %u times in a row)", delay,
@@ -92,53 +114,61 @@ static bool device_gone(void) {
     return g.device && !usb_attached(g.device);
 }
 
-static void disconnect(const char *reason, bool retry) {
-    if (!session_active()) return;
-    uint64_t lived = session_age_ms();
-    bool quiet = retry && !failure_worth_logging(reason);
-    session_stop(reason, quiet);
-    if (retry && may_connect()) {
-        if (lived > 60000) g.attempts = 0;
-        schedule_retry(quiet);
-    }
+static void disconnect(const char *reason) {
+    if (session_active()) session_stop(reason, false);
 }
 
 /* The session broke. On unplug a transfer usually fails before the removal notification arrives. */
 static void session_broke(void) {
-    if (device_gone()) device_removed();
-    else disconnect(session_failure(), true);
+    if (device_gone()) { device_removed(); return; }
+    if (!session_active()) return;
+    const char *reason = session_failure();
+    uint64_t lived = session_age_ms();
+    bool quiet = !note_failure(reason);
+    session_stop(reason, quiet);
+    if (!may_connect()) return;
+    if (lived > STABLE_SESSION_MS) g.attempts = 0; /* a stable session starts the delays over */
+    schedule_retry(quiet);
 }
 
 static void reject_device(const char *why) {
     g.device_rejected = true;
     g.rejected[g.rejected_next++ % REJECTED_MAX] = g.device_id;
     logmsg("%s: %s; ignoring it until it is plugged in again", g.device_name, why);
+    rescan_devices(); /* a phone plugged in next to it was waiting */
 }
 
 static void connect_phone(void) {
     if (session_active() || !may_connect()) return;
     bool init_failed = false;
-    const char *e = session_start(g.device, g.device_name, &g.cfg, session_broke, &init_failed);
-    if (!e) {
-        g.last_failure[0] = 0;
-        g.failure_repeats = g.init_failures = 0;
+    const char *reason = session_start(g.device, g.device_name, &g.cfg, session_broke, &init_failed);
+    if (!reason) {
+        forget_failures();
         return;
     }
-    /* A CDC-ACM lookalike must not be held open and probed every 30 seconds. */
-    if (init_failed && g.device_cdc && ++g.init_failures >= CDC_INIT_ATTEMPTS) {
-        reject_device("this CDC function does not answer as RNDIS");
-        return;
+    /* A CDC-ACM lookalike must not be held open and probed again and again. */
+    if (init_failed && g.device_cdc) {
+        ++g.init_failures;
+        if (g.init_failures >= CDC_INIT_ATTEMPTS) {
+            reject_device("this CDC function does not answer as RNDIS");
+            return;
+        }
     }
-    bool quiet = !failure_worth_logging(e);
-    if (!quiet) logmsg("cannot connect to %s: %s", g.device_name, e);
+    bool quiet = !note_failure(reason);
+    if (!quiet) logmsg("cannot connect to %s: %s", g.device_name, reason);
     schedule_retry(quiet);
 }
 
-/* A phone just plugged in, or usable again after a pause: a fresh start in a second. */
+/* Retry delays start over; the first attempt comes after settle seconds. */
+static void restart_retries(double settle) {
+    g.attempts = 0;
+    if (may_connect()) timer_set(g.retry_timer, settle);
+}
+
+/* A phone just plugged in, or usable again after a pause: earlier failures say nothing. */
 static void connect_soon(void) {
-    g.attempts = g.failure_repeats = g.init_failures = 0;
-    g.last_failure[0] = 0;
-    if (may_connect()) timer_set(g.retry_timer, 1.0); /* let the data interface and the phone settle */
+    forget_failures();
+    restart_retries(PLUG_SETTLE_S);
 }
 
 static void retry_fired(CFRunLoopTimerRef timer, void *info) {
@@ -163,7 +193,7 @@ static void forget_device(void) {
 }
 
 static void rescan_devices(void) {
-    for (unsigned kind = 0; kind < USB_MATCHING_KINDS; ++kind) {
+    for (UsbMatching kind = 0; kind < USB_MATCHING_KINDS; ++kind) {
         io_iterator_t existing = IO_OBJECT_NULL;
         CFMutableDictionaryRef match = usb_create_matching(kind);
         if (match && IOServiceGetMatchingServices(kIOMainPortDefault, match, &existing) == KERN_SUCCESS) {
@@ -176,9 +206,9 @@ static void rescan_devices(void) {
 static void device_removed(void) {
     logmsg("phone unplugged or USB tethering turned off");
     session_unplugged();
-    disconnect("device removed", false);
+    disconnect("device removed");
     forget_device();
-    rescan_devices(); /* pick up a device that was ignored while this one was in use */
+    rescan_devices(); /* pick up a device that was ignored while this one was plugged in */
 }
 
 static void device_message(void *refcon, io_service_t service, natural_t type, void *argument) {
@@ -187,9 +217,34 @@ static void device_message(void *refcon, io_service_t service, natural_t type, v
     if (type == kIOMessageServiceIsTerminated && g.device && IOObjectIsEqualTo(service, g.device)) device_removed();
 }
 
-static bool rejected_device(uint64_t id) {
-    for (unsigned i = 0; i < REJECTED_MAX; ++i) if (id && g.rejected[i] == id) return true;
+/* 0 marks an empty ring slot, not a device. */
+static bool rejected_earlier(uint64_t id) {
+    if (!id) return false;
+    for (unsigned i = 0; i < REJECTED_MAX; ++i) if (g.rejected[i] == id) return true;
     return false;
+}
+
+/* The phone in hand stays, also while paused or between retries, until it leaves the
+ * registry (a re-enumerated phone) or is rejected. A 02/02/ff function that has no
+ * session may not be RNDIS at all and makes room. When the phone goes, device_removed
+ * looks for the devices it kept waiting. */
+static bool device_in_hand(void) {
+    return g.device && !g.device_rejected && !device_gone() && (!g.device_cdc || session_active());
+}
+
+static void take_device(io_service_t service, uint64_t id, bool cdc) {
+    g.device = service;
+    g.device_id = id;
+    g.device_cdc = cdc;
+    usb_describe(service, g.device_name, sizeof g.device_name);
+    kern_return_t interest = IOServiceAddInterestNotification(g.port, service, kIOGeneralInterest,
+                                                              device_message, NULL, &g.device_interest);
+    if (interest != KERN_SUCCESS) {
+        g.device_interest = IO_OBJECT_NULL;
+        logmsg("warning: no removal notifications for this device (0x%08x)", interest);
+    }
+    logmsg("USB tethering detected: %s", g.device_name);
+    connect_soon();
 }
 
 static void device_matched(void *refcon, io_iterator_t iterator) {
@@ -198,35 +253,23 @@ static void device_matched(void *refcon, io_iterator_t iterator) {
     while ((service = IOIteratorNext(iterator))) {
         bool cdc = false;
         uint64_t id = 0;
-        if (IORegistryEntryGetRegistryEntryID(service, &id) != KERN_SUCCESS || rejected_device(id) ||
+        if (IORegistryEntryGetRegistryEntryID(service, &id) != KERN_SUCCESS || rejected_earlier(id) ||
             !usb_rndis_candidate(service, &cdc)) { IOObjectRelease(service); continue; }
         if (g.device && IOObjectIsEqualTo(service, g.device)) { IOObjectRelease(service); continue; }
-        if (g.device && session_active() && !device_gone()) {
-            char name[160];
+        if (device_in_hand()) {
+            char name[USB_DESCRIPTION_SIZE];
             usb_describe(service, name, sizeof name);
             logmsg("ignoring additional RNDIS device %s (one phone at a time)", name);
             IOObjectRelease(service);
             continue;
         }
-        if (g.device) { /* A re-enumerated phone leaves a stale entry: switch to the new one. */
+        if (g.device) { /* a stale entry of a re-enumerated phone, or a device that makes room */
             logmsg("switching to the newly attached RNDIS function");
             if (device_gone()) session_unplugged();
-            disconnect("device re-enumerated", false);
+            disconnect("device re-enumerated");
             forget_device();
         }
-        g.device = service;
-        g.device_id = id;
-        g.device_cdc = cdc;
-        g.device_rejected = false;
-        usb_describe(service, g.device_name, sizeof g.device_name);
-        kern_return_t interest = IOServiceAddInterestNotification(g.port, service, kIOGeneralInterest,
-                                                                  device_message, NULL, &g.device_interest);
-        if (interest != KERN_SUCCESS) {
-            g.device_interest = IO_OBJECT_NULL;
-            logmsg("warning: no removal notifications for this device (0x%08x)", interest);
-        }
-        logmsg("USB tethering detected: %s", g.device_name);
-        connect_soon();
+        take_device(service, id, cdc);
     }
 }
 
@@ -234,7 +277,7 @@ static bool watch_devices(void) {
     g.port = IONotificationPortCreate(kIOMainPortDefault);
     if (!g.port) return false;
     CFRunLoopAddSource(CFRunLoopGetMain(), IONotificationPortGetRunLoopSource(g.port), kCFRunLoopDefaultMode);
-    for (unsigned kind = 0; kind < USB_MATCHING_KINDS; ++kind) {
+    for (UsbMatching kind = 0; kind < USB_MATCHING_KINDS; ++kind) {
         CFMutableDictionaryRef match = usb_create_matching(kind);
         if (!match || IOServiceAddMatchingNotification(g.port, kIOFirstMatchNotification, match, device_matched,
                                                        NULL, &g.matches[kind]) != KERN_SUCCESS) return false;
@@ -255,15 +298,13 @@ static void power_message(void *refcon, io_service_t service, natural_t type, vo
     case kIOMessageSystemWillSleep:
         g.sleeping = true;
         timer_disarm(g.retry_timer);
-        disconnect("system is going to sleep", false);
+        disconnect("system is going to sleep");
         IOAllowPowerChange(g.power_root, (long)argument);
         break;
     case kIOMessageSystemHasPoweredOn:
         g.sleeping = false;
-        if (g.device && !session_active()) {
-            g.attempts = 0;
-            if (may_connect()) timer_set(g.retry_timer, 2.0);
-        }
+        /* Earlier failures remain: the phone did not change. */
+        if (g.device && !session_active()) restart_retries(WAKE_SETTLE_S);
         break;
     default:
         break;
@@ -281,20 +322,20 @@ static void watch_power(void) {
 static void on_signal(void *context) {
     logmsg("signal %d: shutting down", (int)(intptr_t)context);
     g.shutting_down = true;
-    disconnect("service stopped", false);
+    disconnect("service stopped");
     unlink(STATUS_SOCKET);
     unlink(ADMIN_SOCKET);
     CFRunLoopStop(CFRunLoopGetMain());
 }
 
-static void watch_signal(unsigned slot, int signal_number) {
+static dispatch_source_t watch_signal(int signal_number) {
     signal(signal_number, SIG_IGN);
     dispatch_source_t source = dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL, (uintptr_t)signal_number, 0,
                                                       dispatch_get_main_queue());
     dispatch_set_context(source, (void *)(intptr_t)signal_number);
     dispatch_source_set_event_handler_f(source, on_signal);
     dispatch_resume(source);
-    g.signals[slot] = source; /* lives as long as the daemon */
+    return source;
 }
 
 /* ------------------------------------------------------------------ status */
@@ -303,9 +344,9 @@ static size_t status_report(char *buffer, size_t size) {
     SessionStatus session;
     bool active = session_status(&session);
     /* While paused no retry notices a phone whose removal notification was lost. */
-    bool phone = g.device && !(g.paused && device_gone());
+    bool phone_known = g.device && !(g.paused && device_gone());
     StatusFacts facts = {
-        .phone = phone ? g.device_name : NULL,
+        .phone = phone_known ? g.device_name : NULL,
         .rejected = g.device_rejected,
         .sleeping = g.sleeping,
         .paused = g.paused,
@@ -330,7 +371,7 @@ static const char *user_name(uid_t uid) {
 /* After the admin reply: a teardown can take seconds, longer than a client waits. */
 static void pause_now(void *context) {
     (void)context;
-    if (g.paused) disconnect("paused", false);
+    if (g.paused) disconnect("paused");
 }
 
 /* `set paused yes|no`: not a setting, never saved. Pausing ends the session as sleep
@@ -338,7 +379,7 @@ static void pause_now(void *context) {
  * a phone that is plugged in, as when it was plugged in. */
 static bool set_paused(uid_t uid, const char *value, char *why, size_t why_size) {
     bool paused;
-    if (!config_parse_bool("paused", value, &paused, why, why_size)) return false;
+    if (!config_parse_bool(ADMIN_SETTING_PAUSED, value, &paused, why, why_size)) return false;
     if (paused == g.paused) return true;
     g.paused = paused;
     logmsg("%s by %s", paused ? "paused" : "resumed", user_name(uid));
@@ -353,18 +394,15 @@ static bool set_paused(uid_t uid, const char *value, char *why, size_t why_size)
 
 /* From the admin socket: a setting the service applies at once, also saved in the file. */
 static bool change_setting(uid_t uid, const char *name, const char *value, char *why, size_t why_size) {
-    if (!strcmp(name, "paused")) return set_paused(uid, value, why, why_size);
-    if (!config_live(name)) {
-        snprintf(why, why_size, "%s applies only when the service starts again: sudo rndis-tether config %s %s",
-                 name, name, value);
-        return false;
-    }
-    Config file, running = g.cfg; /* options of a foreground `run` stay as they are */
-    char problem[300];
+    if (!strcmp(name, ADMIN_SETTING_PAUSED)) return set_paused(uid, value, why, why_size);
+    Config running = g.cfg; /* options of a foreground `run` stay as they are */
+    if (!config_set_live(&running, name, value, why, why_size)) return false;
+    Config file; /* what the settings file holds, rewritten whole by config_save */
+    char problem[CONFIG_PROBLEM_SIZE];
     config_defaults(&file);
     (void)config_load(&file, CONFIG_PATH, problem, sizeof problem); /* a bad line is saved as its default */
-    if (!config_set(&file, name, value, why, why_size) || !config_set(&running, name, value, why, why_size) ||
-        !config_save(&file, CONFIG_PATH, why, why_size)) return false;
+    if (!config_set(&file, name, value, why, why_size) || !config_save(&file, CONFIG_PATH, why, why_size))
+        return false;
     g.cfg = running;
     g.settings_problem[0] = 0;
     log_verbose = g.cfg.verbose;
@@ -385,7 +423,7 @@ static void serve_admin(void) {
 /* Held for the daemon's lifetime; the kernel releases it however the process ends.
  * Only root can open it: a user holding it would keep the service from starting. */
 static bool take_lock(void) {
-    if (!runtime_dir(RUNTIME_DIR)) return false;
+    if (!runtime_dir_ready(RUNTIME_DIR)) return false;
     int fd = open(LOCK_PATH, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
     return fd >= 0 && !flock(fd, LOCK_EX | LOCK_NB);
 }
@@ -402,7 +440,7 @@ int daemon_run(const Config *cfg, const char *settings_problem) {
     if (!take_lock()) {
         if (errno == EWOULDBLOCK)
             fputs("rndis-tether is already running (the installed service?). To run it here instead:\n"
-                  "  sudo launchctl bootout system/" LABEL "\n"
+                  "  sudo launchctl bootout " SERVICE_TARGET "\n"
                   "and afterwards start the service again with:  sudo rndis-tether install\n", stderr);
         else if (errno == EPERM)
             fputs(RUNTIME_DIR " must be a directory only root can use (mode 0700); remove it and try again\n",
@@ -423,9 +461,7 @@ int daemon_run(const Config *cfg, const char *settings_problem) {
         logmsg("cannot watch network state (SystemConfiguration)");
         return 1;
     }
-    watch_signal(0, SIGTERM);
-    watch_signal(1, SIGINT);
-    watch_signal(2, SIGHUP);
+    for (unsigned i = 0; i < STOP_SIGNAL_COUNT; ++i) g.signals[i] = watch_signal(STOP_SIGNALS[i]);
     if (!status_serve(RUNTIME_DIR, STATUS_SOCKET, status_report))
         logmsg("warning: no answers for `rndis-tether status`: %s", strerror(errno));
     serve_admin();

@@ -11,7 +11,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
-bool runtime_dir(const char *dir) {
+bool runtime_dir_ready(const char *dir) {
     struct stat st;
     if (mkdir(dir, 0700) && errno != EEXIST) return false;
     if (lstat(dir, &st)) return false;
@@ -35,8 +35,7 @@ int runtime_listen(const char *dir, const char *path, gid_t gid, mode_t mode) {
     bool bound = fd >= 0 && !fcntl(fd, F_SETFD, FD_CLOEXEC) && !fcntl(fd, F_SETFL, O_NONBLOCK) &&
                  !bind(fd, (const struct sockaddr *)&address, sizeof address);
     umask(umask_before);
-    /* The backlog holds two status batches (status.h). */
-    if (bound && !chown(address.sun_path, (uid_t)-1, gid) && !chmod(address.sun_path, mode) && !listen(fd, 16) &&
+    if (bound && !chown(address.sun_path, (uid_t)-1, gid) && !chmod(address.sun_path, mode) && !listen(fd, RUNTIME_BACKLOG) &&
         !rename(address.sun_path, path))
         return fd;
     int error = errno;
@@ -57,7 +56,10 @@ bool runtime_mark_interfaces(const char *marker, const char *host, const char *p
 }
 
 bool runtime_marked_interfaces(const char *marker, char host[IFNAMSIZ], char peer[IFNAMSIZ]) {
-    char text[64], a[32], b[32], extra;
+    /* Wider than IFNAMSIZ on purpose: an overlong name (or its first 31 characters) is still
+     * too long and is rejected below, never cut into a valid-looking one.
+     * %31s is one less than the buffers. */
+    char text[64], host_name[32], peer_name[32], extra;
     int fd = open(marker, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0) return false;
     ssize_t n = read(fd, text, sizeof text - 1);
@@ -65,10 +67,10 @@ bool runtime_marked_interfaces(const char *marker, char host[IFNAMSIZ], char pee
     if (n <= 0) return false;
     text[n] = 0;
     /* The names go to `ifconfig <name> destroy`: only two different fethN. */
-    if (sscanf(text, "%31s %31s %c", a, b, &extra) != 2 || !config_interface_valid(a) ||
-        !config_interface_valid(b) || !strcmp(a, b)) return false;
-    strlcpy(host, a, IFNAMSIZ);
-    strlcpy(peer, b, IFNAMSIZ);
+    if (sscanf(text, "%31s %31s %c", host_name, peer_name, &extra) != 2 || !config_interface_valid(host_name) ||
+        !config_interface_valid(peer_name) || !strcmp(host_name, peer_name)) return false;
+    strlcpy(host, host_name, IFNAMSIZ);
+    strlcpy(peer, peer_name, IFNAMSIZ);
     return true;
 }
 

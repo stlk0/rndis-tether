@@ -56,7 +56,7 @@ int main(void) {
     bpf = bpf_open_bound("feth61", &size, why, sizeof why);
     const char *addr[] = {"/sbin/ifconfig", "feth60", "inet", "192.0.2.1/24", "up", NULL};
     udp = socket(AF_INET, SOCK_DGRAM, 0);
-    if (bpf < 0 || !run_command(addr, 5000) || udp < 0) {
+    if (bpf < 0 || !run_command(addr, COMMAND_TIMEOUT_MS) || udp < 0) {
         fprintf(stderr, "setup failed: %s\n", bpf < 0 ? why : "ifconfig/socket");
         feth_destroy("feth60");
         feth_destroy("feth61");
@@ -131,7 +131,7 @@ int main(void) {
         frame[k][14] = (uint8_t)k;
         used += bpf_put(batch, used, sizeof batch, frame[k], sizeof frame[k]);
     }
-    bool batch_on = bpf_batch_write(bpf, true);
+    bool batch_on = bpf_set_batch_write(bpf, true);
     ssize_t written = batch_on ? write(bpf, batch, used) : -1;
     int write_error = errno;
     unsigned arrived = 0;

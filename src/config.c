@@ -2,11 +2,16 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <strings.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+#define FETH_PREFIX "feth" /* if_fake's interface name, followed by the unit number */
+#define CONFIG_LINE_SIZE 512 /* a longer line is reported as too long */
+#define TX_BATCH_AUTO "auto" /* tx-batch 0 in the file and in config: what the phone allows */
 
 void config_defaults(Config *c) {
     *c = (Config){.prefer_phone = true};
@@ -24,9 +29,10 @@ static bool parse_bool(const char *value, bool *out) {
 }
 
 bool config_interface_valid(const char *name) {
+    const size_t prefix = sizeof FETH_PREFIX - 1;
     size_t n = strlen(name);
-    if (n < 5 || n >= IFNAMSIZ || strncmp(name, "feth", 4)) return false;
-    for (size_t i = 4; i < n; ++i) if (!isdigit((unsigned char)name[i])) return false;
+    if (n <= prefix || n >= IFNAMSIZ || strncmp(name, FETH_PREFIX, prefix)) return false;
+    for (size_t i = prefix; i < n; ++i) if (!isdigit((unsigned char)name[i])) return false;
     return true;
 }
 
@@ -45,30 +51,45 @@ static bool set_interface(char *interface, const char *name, const char *value, 
     return false;
 }
 
-bool config_set(Config *c, const char *name, const char *value, char *why, size_t why_size) {
-    if (!strcmp(name, "prefer-phone")) return config_parse_bool(name, value, &c->prefer_phone, why, why_size);
-    if (!strcmp(name, "ipv6")) return config_parse_bool(name, value, &c->ipv6, why, why_size);
-    if (!strcmp(name, "verbose")) return config_parse_bool(name, value, &c->verbose, why, why_size);
-    if (!strcmp(name, "host-interface")) return set_interface(c->host, name, value, why, why_size);
-    if (!strcmp(name, "peer-interface")) return set_interface(c->peer, name, value, why, why_size);
-    if (!strcmp(name, "tx-batch")) {
-        char *end = NULL;
-        long n = strtol(value, &end, 10);
-        if (!strcasecmp(value, "auto")) c->tx_batch = 0;
-        else if (*value && !*end && n >= 1 && n <= 32) c->tx_batch = (unsigned)n;
-        else {
-            snprintf(why, why_size, "tx-batch must be auto or a number from 1 to 32, not \"%s\"", value);
-            return false;
-        }
+static bool set_tx_batch(unsigned *tx_batch, const char *value, char *why, size_t why_size) {
+    if (!strcasecmp(value, TX_BATCH_AUTO)) { *tx_batch = 0; return true; }
+    /* strtol alone would also take leading spaces and a sign. */
+    bool digits = *value && strspn(value, "0123456789") == strlen(value);
+    long n = digits ? strtol(value, NULL, 10) : 0;
+    if (digits && n >= 1 && n <= TX_BATCH_MAX) {
+        *tx_batch = (unsigned)n;
         return true;
     }
-    snprintf(why, why_size, "unknown setting \"%s\" (known: prefer-phone, ipv6, tx-batch, verbose, "
-             "host-interface, peer-interface)", name);
+    snprintf(why, why_size, "tx-batch must be auto or a number from 1 to %u, not \"%s\"", TX_BATCH_MAX, value);
+    return false;
+}
+
+bool config_set(Config *c, const char *name, const char *value, char *why, size_t why_size) {
+    if (!strcmp(name, SETTING_PREFER_PHONE)) return config_parse_bool(name, value, &c->prefer_phone, why, why_size);
+    if (!strcmp(name, SETTING_IPV6)) return config_parse_bool(name, value, &c->ipv6, why, why_size);
+    if (!strcmp(name, SETTING_VERBOSE)) return config_parse_bool(name, value, &c->verbose, why, why_size);
+    if (!strcmp(name, SETTING_HOST_INTERFACE)) return set_interface(c->host, name, value, why, why_size);
+    if (!strcmp(name, SETTING_PEER_INTERFACE)) return set_interface(c->peer, name, value, why, why_size);
+    if (!strcmp(name, SETTING_TX_BATCH)) return set_tx_batch(&c->tx_batch, value, why, why_size);
+    snprintf(why, why_size, "unknown setting \"%s\" (known: " SETTING_PREFER_PHONE ", " SETTING_IPV6 ", "
+             SETTING_TX_BATCH ", " SETTING_VERBOSE ", " SETTING_HOST_INTERFACE ", " SETTING_PEER_INTERFACE ")", name);
     return false;
 }
 
 bool config_live(const char *name) {
-    return !strcmp(name, "prefer-phone") || !strcmp(name, "verbose");
+    return !strcmp(name, SETTING_PREFER_PHONE) || !strcmp(name, SETTING_VERBOSE);
+}
+
+bool config_set_live(Config *c, const char *name, const char *value, char *why, size_t why_size) {
+    Config changed = *c;
+    if (!config_set(&changed, name, value, why, why_size)) return false;
+    if (!config_live(name)) {
+        snprintf(why, why_size, "%s applies only when the service starts again: sudo rndis-tether config %s %s",
+                 name, name, value);
+        return false;
+    }
+    *c = changed;
+    return true;
 }
 
 bool config_check(const Config *c, char *why, size_t why_size) {
@@ -84,7 +105,8 @@ static char *trim(char *s) {
     return s;
 }
 
-/* One line without its newline; false and problem when it is not a setting. */
+/* One line of the file (its newline goes with the trailing spaces); false and problem
+ * when it is not a setting. */
 static bool parse_line(Config *c, char *line, char *problem, size_t problem_size) {
     char *hash = strchr(line, '#');
     if (hash) *hash = 0;
@@ -106,12 +128,12 @@ bool config_load(Config *c, const char *path, char *why, size_t why_size) {
         return false;
     }
     /* One bad line must not cost the others: `config` saves what was read. */
-    char line[512], problem[200];
-    unsigned number = 0;
+    char line[CONFIG_LINE_SIZE], problem[200];
+    unsigned line_number = 0;
     bool ok = true;
     bool end = false;
     while (!end && fgets(line, sizeof line, f)) {
-        ++number;
+        ++line_number;
         size_t length = strlen(line);
         bool fits = true;
         if (length == sizeof line - 1 && line[length - 1] != '\n') {
@@ -123,7 +145,7 @@ bool config_load(Config *c, const char *path, char *why, size_t why_size) {
         }
         if (!fits) strlcpy(problem, "line is too long", sizeof problem);
         else if (parse_line(c, line, problem, sizeof problem)) continue;
-        if (ok) snprintf(why, why_size, "%s line %u: %s", path, number, problem);
+        if (ok) snprintf(why, why_size, "%s line %u: %s", path, line_number, problem);
         ok = false;
     }
     if (ferror(f) && ok) {
@@ -143,25 +165,35 @@ bool config_load(Config *c, const char *path, char *why, size_t why_size) {
     return ok;
 }
 
+#define TX_BATCH_TEXT_SIZE sizeof "4294967295"
+
+/* tx-batch as written in the file; buffer holds a number. */
+static const char *tx_batch_text(unsigned tx_batch, char *buffer, size_t size) {
+    if (!tx_batch) return TX_BATCH_AUTO;
+    snprintf(buffer, size, "%u", tx_batch);
+    return buffer;
+}
+
 void config_print(const Config *c, FILE *out) {
-    fprintf(out, "prefer-phone = %s\n", c->prefer_phone ? "yes" : "no");
-    fprintf(out, "ipv6 = %s\n", c->ipv6 ? "yes" : "no");
-    if (c->tx_batch) fprintf(out, "tx-batch = %u\n", c->tx_batch);
-    else fputs("tx-batch = auto\n", out);
-    fprintf(out, "verbose = %s\n", c->verbose ? "yes" : "no");
-    fprintf(out, "host-interface = %s\n", c->host);
-    fprintf(out, "peer-interface = %s\n", c->peer);
+    char batch[TX_BATCH_TEXT_SIZE];
+    fprintf(out, SETTING_PREFER_PHONE " = %s\n", config_bool_text(c->prefer_phone));
+    fprintf(out, SETTING_IPV6 " = %s\n", config_bool_text(c->ipv6));
+    fprintf(out, SETTING_TX_BATCH " = %s\n", tx_batch_text(c->tx_batch, batch, sizeof batch));
+    fprintf(out, SETTING_VERBOSE " = %s\n", config_bool_text(c->verbose));
+    fprintf(out, SETTING_HOST_INTERFACE " = %s\n", c->host);
+    fprintf(out, SETTING_PEER_INTERFACE " = %s\n", c->peer);
 }
 
 bool config_save(const Config *c, const char *path, char *why, size_t why_size) {
     if (!config_check(c, why, why_size)) return false;
-    char temporary[1024];
+    char temporary[PATH_MAX];
     snprintf(temporary, sizeof temporary, "%s.new", path);
     FILE *f = fopen(temporary, "w");
     if (!f) {
         snprintf(why, why_size, "cannot write %s: %s", temporary, strerror(errno));
         return false;
     }
+    char batch[TX_BATCH_TEXT_SIZE];
     fprintf(f,
         "# rndis-tether settings.\n"
         "# Change one with:  rndis-tether config <name> <value>\n"
@@ -171,26 +203,23 @@ bool config_save(const Config *c, const char *path, char *why, size_t why_size) 
         "# Send internet traffic through the phone while it is connected, even when Wi-Fi\n"
         "# is on. Local network and VPNs keep working. With \"no\", the phone is used only\n"
         "# when there is no other connection.\n"
-        "prefer-phone = %s\n"
+        SETTING_PREFER_PHONE " = %s\n"
         "\n"
         "# Also set up IPv6 on the phone connection.\n"
-        "ipv6 = %s\n"
+        SETTING_IPV6 " = %s\n"
         "\n"
         "# Most network packets sent to the phone in one USB transfer: auto (what the phone\n"
-        "# allows, up to 32) or 1 to 32. Try 1 if uploads stall with a particular phone.\n"
-        "tx-batch = ",
-        c->prefer_phone ? "yes" : "no", c->ipv6 ? "yes" : "no");
-    if (c->tx_batch) fprintf(f, "%u\n", c->tx_batch);
-    else fputs("auto\n", f);
-    fprintf(f,
+        "# allows, up to %u) or 1 to %u. Try 1 if uploads stall with a particular phone.\n"
+        SETTING_TX_BATCH " = %s\n"
         "\n"
         "# Detailed log, for troubleshooting.\n"
-        "verbose = %s\n"
+        SETTING_VERBOSE " = %s\n"
         "\n"
         "# Names of the two virtual network interfaces. Change only if these are taken.\n"
-        "host-interface = %s\n"
-        "peer-interface = %s\n",
-        c->verbose ? "yes" : "no", c->host, c->peer);
+        SETTING_HOST_INTERFACE " = %s\n"
+        SETTING_PEER_INTERFACE " = %s\n",
+        config_bool_text(c->prefer_phone), config_bool_text(c->ipv6), TX_BATCH_MAX, TX_BATCH_MAX,
+        tx_batch_text(c->tx_batch, batch, sizeof batch), config_bool_text(c->verbose), c->host, c->peer);
     /* On disk before the rename: a power cut must not leave an empty file behind. */
     bool written = !ferror(f) && !fflush(f) && !fsync(fileno(f));
     if (fclose(f) || !written || chmod(temporary, 0644) || rename(temporary, path)) {

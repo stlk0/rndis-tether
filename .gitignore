@@ -2,6 +2,7 @@
 /rndis-tether-selftest
 /rndis-tether-controltest
 /rndis-tether-sessiontest
+/rndis-tether-bringuptest
 /bpf-feth-test
 *.dSYM/
 .DS_Store

@@ -28,18 +28,28 @@ typedef struct {
     uint32_t generation; /* completions of an earlier open are dropped */
 } UsbLink;
 
-/* Matching dictionary for RNDIS control interfaces (consumed by IOKit calls), one of
- * USB_MATCHING_KINDS: 0 for e0/01/03, 1 for the Android variant 02/02/ff. */
-#define USB_MATCHING_KINDS 2u
-CFMutableDictionaryRef usb_create_matching(unsigned kind);
-/* Inspects cached descriptors through a user client without opening the interface. */
+/* Matching dictionary for RNDIS control interfaces (consumed by IOKit calls). */
+typedef enum {
+    USB_MATCH_RNDIS,    /* e0/01/03 */
+    USB_MATCH_CDC,      /* the Android variant 02/02/ff */
+    USB_MATCHING_KINDS
+} UsbMatching;
+CFMutableDictionaryRef usb_create_matching(UsbMatching kind);
+/* For an interface found with usb_create_matching: false if it cannot be RNDIS. *cdc is
+ * true for the 02/02/ff variant; only that one is inspected, through a user client on
+ * IOKit's cached descriptors without opening the interface, and rejected when its CDC
+ * descriptors are invalid or announce ACM (a modem). */
 bool usb_rndis_candidate(io_service_t service, bool *cdc);
 
 /* Human-readable "name vid:pid" of the device owning an interface, for logs and status;
  * the name the device reports is reduced to printable ASCII. */
+#define USB_DESCRIPTION_SIZE 160
 void usb_describe(io_service_t interface, char *out, size_t size);
 /* False once the interface has left the registry (unplugged, or the phone re-enumerated). */
 bool usb_attached(io_service_t interface);
+
+#define USB_REASON_BUSY "already open by another program" /* cli.c matches these for advice */
+#define USB_REASON_NO_DATA "data interface not found"
 
 /* Opens both interfaces and attaches their async event sources to the main run loop.
  * Returns NULL or a reason; on failure everything opened so far is closed. */
@@ -70,12 +80,20 @@ typedef enum { USB_NOTIFY, USB_BULK_IN, USB_BULK_OUT } UsbPipe;
 #define USB_ERROR_BURST 32u /* consecutive failed transfers on one pipe before giving up */
 
 IOReturn usb_read(UsbLink *u, UsbPipe pipe, UsbTransfer *t, void *buffer, uint32_t size);
+/* A bulk OUT write completes, or fails, within this time: a phone that stops reading
+ * must not hold a transfer slot for long. */
+#define USB_WRITE_TIMEOUT_MS 5000u
 IOReturn usb_write(UsbLink *u, UsbTransfer *t, const void *buffer, uint32_t size);
 /* SEND_ENCAPSULATED_COMMAND (in = false) or GET_ENCAPSULATED_RESPONSE (in = true). */
 IOReturn usb_control(UsbLink *u, UsbTransfer *t, bool in, void *buffer, uint16_t size, uint32_t timeout_ms);
 void usb_clear_stall(UsbLink *u, UsbPipe pipe);
 /* Aborts the interrupt and bulk pipes; pipe 0 cannot be aborted. */
 void usb_abort(UsbLink *u);
+
+/* Statuses after which the pipe must be cleared (usb_clear_stall) before it is used again. */
+static inline bool usb_needs_clear(IOReturn r) {
+    return r == kIOUSBPipeStalled || r == kIOUSBTransactionTimeout;
+}
 
 /* Statuses after which the session cannot continue on this interface. */
 static inline bool usb_fatal(IOReturn r) {

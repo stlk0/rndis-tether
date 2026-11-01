@@ -13,7 +13,7 @@
 
 static int list_devices(void) {
     unsigned count = 0;
-    for (unsigned kind = 0; kind < USB_MATCHING_KINDS; ++kind) {
+    for (UsbMatching kind = 0; kind < USB_MATCHING_KINDS; ++kind) {
         io_iterator_t it = IO_OBJECT_NULL;
         CFMutableDictionaryRef match = usb_create_matching(kind);
         if (!match || IOServiceGetMatchingServices(kIOMainPortDefault, match, &it) != KERN_SUCCESS) return 1;
@@ -21,7 +21,7 @@ static int list_devices(void) {
         while ((service = IOIteratorNext(it))) {
             bool cdc = false;
             if (usb_rndis_candidate(service, &cdc)) {
-                char name[160];
+                char name[USB_DESCRIPTION_SIZE];
                 usb_describe(service, name, sizeof name);
                 printf("RNDIS %s: %s\n", cdc ? "candidate" : "function", name);
                 ++count;
@@ -50,7 +50,7 @@ static int usage(FILE *out, int code) {
           "  rndis-tether list                   USB tethering devices connected right now\n"
           "  rndis-tether version\n"
           "\n"
-          "Troubleshooting, with the service stopped (sudo launchctl bootout system/" LABEL "):\n"
+          "Troubleshooting, with the service stopped (sudo launchctl bootout " SERVICE_TARGET "):\n"
           "  sudo rndis-tether run [--verbose] [--no-prefer] [--ipv6] [--tx-batch N] [--host fethN] [--peer fethM]\n",
           out);
     return code;
@@ -59,17 +59,17 @@ static int usage(FILE *out, int code) {
 /* The settings file, overridden by the options of `run`. */
 static int run(int argc, char **argv) {
     Config cfg;
-    char problem[300] = "", why[300];
+    char settings_problem[CONFIG_PROBLEM_SIZE] = "", why[CONFIG_PROBLEM_SIZE];
     config_defaults(&cfg);
-    (void)config_load(&cfg, CONFIG_PATH, problem, sizeof problem);
+    (void)config_load(&cfg, CONFIG_PATH, settings_problem, sizeof settings_problem);
     for (int i = 0; i < argc; ++i) {
         const char *a = argv[i], *name = NULL, *value = "yes";
-        if (!strcmp(a, "--verbose")) name = "verbose";
-        else if (!strcmp(a, "--ipv6")) name = "ipv6";
-        else if (!strcmp(a, "--no-prefer")) { name = "prefer-phone"; value = "no"; }
-        else if (i + 1 < argc && !strcmp(a, "--tx-batch")) { name = "tx-batch"; value = argv[++i]; }
-        else if (i + 1 < argc && !strcmp(a, "--host")) { name = "host-interface"; value = argv[++i]; }
-        else if (i + 1 < argc && !strcmp(a, "--peer")) { name = "peer-interface"; value = argv[++i]; }
+        if (!strcmp(a, "--verbose")) name = SETTING_VERBOSE;
+        else if (!strcmp(a, "--ipv6")) name = SETTING_IPV6;
+        else if (!strcmp(a, "--no-prefer")) { name = SETTING_PREFER_PHONE; value = "no"; }
+        else if (i + 1 < argc && !strcmp(a, "--tx-batch")) { name = SETTING_TX_BATCH; value = argv[++i]; }
+        else if (i + 1 < argc && !strcmp(a, "--host")) { name = SETTING_HOST_INTERFACE; value = argv[++i]; }
+        else if (i + 1 < argc && !strcmp(a, "--peer")) { name = SETTING_PEER_INTERFACE; value = argv[++i]; }
         else return usage(stderr, 2);
         if (!config_set(&cfg, name, value, why, sizeof why)) {
             fprintf(stderr, "%s\n", why);
@@ -80,7 +80,7 @@ static int run(int argc, char **argv) {
         fprintf(stderr, "%s\n", why);
         return 2;
     }
-    return daemon_run(&cfg, problem);
+    return daemon_run(&cfg, settings_problem);
 }
 
 int main(int argc, char **argv) {
@@ -91,8 +91,8 @@ int main(int argc, char **argv) {
     if (argc > 2) return usage(stderr, 2);
     if (!strcmp(command, "status")) return cli_status(false);
     if (!strcmp(command, "monitor")) return cli_monitor();
-    if (!strcmp(command, "disconnect")) return cli_pause(true);
-    if (!strcmp(command, "connect")) return cli_pause(false);
+    if (!strcmp(command, "disconnect")) return cli_set_paused(true);
+    if (!strcmp(command, "connect")) return cli_set_paused(false);
     if (!strcmp(command, "install")) return cli_install();
     if (!strcmp(command, "uninstall")) return cli_uninstall();
     if (!strcmp(command, "restart")) return cli_restart();

@@ -145,6 +145,16 @@ static void test_health_messages(void) {
     CHECK(rndis_build_reset(b) == 12 && rndis_le32(b) == RNDIS_RESET_MSG);
     CHECK(rndis_le32(b + 4) == 12 && rndis_le32(b + 8) == 0);
     CHECK(rndis_control_id(b, 12) == 0);
+    /* Status of an indication and DataOffset of a packet sit where a RequestId would. */
+    const uint32_t without_id[] = {RNDIS_INDICATE_STATUS_MSG, RNDIS_PACKET_MSG, 0x1234u};
+    for (size_t k = 0; k < sizeof without_id / sizeof *without_id; ++k) {
+        rndis_put32(b, without_id[k]);
+        rndis_put32(b + 4, 20);
+        rndis_put32(b + 8, RNDIS_STATUS_MEDIA_CONNECT);
+        CHECK(rndis_control_id(b, 20) == 0);
+    }
+    rndis_build_halt(b, 7);
+    CHECK(rndis_control_id(b, 12) == 7);
 
     const uint32_t types[] = {RNDIS_KEEPALIVE_MSG, RNDIS_SET_MSG, RNDIS_RESET_MSG};
     for (size_t t = 0; t < sizeof types / sizeof *types; ++t) {
@@ -153,6 +163,7 @@ static void test_health_messages(void) {
         rndis_put32(b, type | RNDIS_COMPLETION);
         if (type == RNDIS_RESET_MSG) { rndis_put32(b + 8, 0); rndis_put32(b + 12, 1); }
         CHECK(rndis_completion_matches(b, 16, type, 42));
+        CHECK(rndis_control_id(b, 16) == (type == RNDIS_RESET_MSG ? 0 : 42));
         CHECK(rndis_completion_matches(b, 16, type, 43) == (type == RNDIS_RESET_MSG));
         CHECK(!rndis_completion_matches(b, 16, RNDIS_QUERY_MSG, 42));
         for (size_t k = 0; k <= 16; ++k) {
@@ -227,15 +238,21 @@ static void test_health_policy(void) {
     CHECK(!rndis_keepalive_due(999, 1000, false));
     CHECK(rndis_keepalive_due(UINT64_MAX, UINT64_MAX - 5000, false));
     for (uint64_t now = 0; now < 60000; now += 1000) CHECK(!rndis_keepalive_due(now, now, false));
-    unsigned failures = 0;
-    CHECK(rndis_keepalive_result(&failures, false, 0) == RNDIS_HEALTH_OK && failures == 1);
-    CHECK(rndis_keepalive_result(&failures, false, 0) == RNDIS_HEALTH_OK && failures == 2);
-    CHECK(rndis_keepalive_result(&failures, true, 0) == RNDIS_HEALTH_OK && failures == 0);
-    CHECK(rndis_keepalive_result(&failures, true, 1) == RNDIS_HEALTH_RESET && failures == 0);
-    CHECK(rndis_keepalive_result(&failures, false, 0) == RNDIS_HEALTH_OK);
-    CHECK(rndis_keepalive_result(&failures, false, 0) == RNDIS_HEALTH_OK);
-    CHECK(rndis_keepalive_result(&failures, false, 0) == RNDIS_HEALTH_RESTART && failures == 3);
-    CHECK(rndis_keepalive_result(&failures, false, 0) == RNDIS_HEALTH_RESTART && failures == 3);
+    unsigned misses = 0;
+    CHECK(rndis_keepalive_result(&misses, false, 0) == RNDIS_HEALTH_OK && misses == 1);
+    CHECK(rndis_keepalive_result(&misses, false, 0) == RNDIS_HEALTH_OK && misses == 2);
+    CHECK(rndis_keepalive_result(&misses, true, 0) == RNDIS_HEALTH_OK && misses == 0);
+    CHECK(rndis_keepalive_result(&misses, true, 1) == RNDIS_HEALTH_RESET && misses == 0);
+    CHECK(rndis_keepalive_result(&misses, false, 0) == RNDIS_HEALTH_OK);
+    CHECK(rndis_keepalive_result(&misses, false, 0) == RNDIS_HEALTH_OK);
+    CHECK(rndis_keepalive_result(&misses, false, 0) == RNDIS_HEALTH_RESTART && misses == 3);
+    CHECK(rndis_keepalive_result(&misses, false, 0) == RNDIS_HEALTH_RESTART && misses == 3);
+    /* Misses, then a refusal that starts a RESET: the next miss is the first of a new run. */
+    misses = 0;
+    CHECK(rndis_keepalive_result(&misses, false, 0) == RNDIS_HEALTH_OK);
+    CHECK(rndis_keepalive_result(&misses, false, 0) == RNDIS_HEALTH_OK && misses == 2);
+    CHECK(rndis_keepalive_result(&misses, true, 1) == RNDIS_HEALTH_RESET && misses == 0);
+    CHECK(rndis_keepalive_result(&misses, false, 0) == RNDIS_HEALTH_OK && misses == 1);
     CHECK(rndis_reset_decision(0, 0, false, false) == RNDIS_HEALTH_RESET);
     CHECK(rndis_reset_decision(30000, 1, true, false) == RNDIS_HEALTH_RESTART);
     CHECK(rndis_reset_decision(30001, 1, true, false) == RNDIS_HEALTH_RESET);
@@ -265,10 +282,10 @@ static void test_data_path(void) {
         size_t length = 0;
         const char *why = NULL;
         for (unsigned i = 0; i < 5; ++i) {
-            CHECK(rndis_next_frame(&c, &frame, &length, &why) == 1);
+            CHECK(rndis_next_frame(&c, &frame, &length, &why) == RNDIS_FRAME);
             CHECK(length == sizes[i] && !memcmp(frame, frames[i], sizes[i]));
         }
-        CHECK(rndis_next_frame(&c, &frame, &length, &why) == 0);
+        CHECK(rndis_next_frame(&c, &frame, &length, &why) == RNDIS_FRAMES_END);
     }
 
     /* Size limits and invalid frames are refused by the builder. */
@@ -305,30 +322,30 @@ static void test_data_path(void) {
     const uint8_t *frame = NULL;
     size_t length = 0;
     const char *why = NULL;
-    CHECK(rndis_next_frame(&c, &frame, &length, &why) == 1 && length == 468);
-    CHECK(rndis_next_frame(&c, &frame, &length, &why) == 0);
+    CHECK(rndis_next_frame(&c, &frame, &length, &why) == RNDIS_FRAME && length == 468);
+    CHECK(rndis_next_frame(&c, &frame, &length, &why) == RNDIS_FRAMES_END);
 
     /* Zero tail of any length after valid messages is padding. */
     used = rndis_append_packet(buffer, 0, 4096, f, 100, 0);
     memset(buffer + used, 0, 300);
     c = (RndisCursor){buffer, used + 300};
-    CHECK(rndis_next_frame(&c, &frame, &length, &why) == 1);
-    CHECK(rndis_next_frame(&c, &frame, &length, &why) == 0);
+    CHECK(rndis_next_frame(&c, &frame, &length, &why) == RNDIS_FRAME);
+    CHECK(rndis_next_frame(&c, &frame, &length, &why) == RNDIS_FRAMES_END);
 
     /* Non-zero garbage after a message: frame is delivered, then the rest is refused. */
     buffer[used] = 0xff;
     c = (RndisCursor){buffer, used + 300};
-    CHECK(rndis_next_frame(&c, &frame, &length, &why) == 1);
-    CHECK(rndis_next_frame(&c, &frame, &length, &why) == -1 && why);
-    CHECK(rndis_next_frame(&c, &frame, &length, &why) == 0);
+    CHECK(rndis_next_frame(&c, &frame, &length, &why) == RNDIS_FRAME);
+    CHECK(rndis_next_frame(&c, &frame, &length, &why) == RNDIS_FRAMES_MALFORMED && why);
+    CHECK(rndis_next_frame(&c, &frame, &length, &why) == RNDIS_FRAMES_END);
 
     /* A frame of unacceptable size is skipped (2) without losing the next message. */
     size_t first = rndis_append_packet(buffer, 0, 4096, f, 60, 0);
     rndis_put32(buffer + 12, 10); /* DataLength 10 < Ethernet header */
     used = first + rndis_append_packet(buffer, first, 4096, f, 70, 0);
     c = (RndisCursor){buffer, used};
-    CHECK(rndis_next_frame(&c, &frame, &length, &why) == 2);
-    CHECK(rndis_next_frame(&c, &frame, &length, &why) == 1 && length == 70);
+    CHECK(rndis_next_frame(&c, &frame, &length, &why) == RNDIS_FRAME_SKIPPED);
+    CHECK(rndis_next_frame(&c, &frame, &length, &why) == RNDIS_FRAME && length == 70);
 
     /* Header field corruption never reads outside the buffer. */
     const size_t offsets[] = {0, 4, 8, 12};
@@ -338,10 +355,10 @@ static void test_data_path(void) {
             used = rndis_append_packet(buffer, 0, 4096, f, 100, 0);
             rndis_put32(buffer + offsets[i], values[v]);
             c = (RndisCursor){buffer, used};
-            int r;
+            RndisFrameResult r;
             unsigned guard = 0;
-            while ((r = rndis_next_frame(&c, &frame, &length, &why)) != 0 && guard++ < 4)
-                if (r == 1) CHECK(frame >= buffer && frame + length <= buffer + used);
+            while ((r = rndis_next_frame(&c, &frame, &length, &why)) != RNDIS_FRAMES_END && guard++ < 4)
+                if (r == RNDIS_FRAME) CHECK(frame >= buffer && frame + length <= buffer + used);
             CHECK(guard < 4);
         }
     }
@@ -349,7 +366,8 @@ static void test_data_path(void) {
     used = rndis_append_packet(buffer, 0, 4096, f, 100, 0);
     for (size_t k = 1; k < used; ++k) {
         c = (RndisCursor){buffer, k};
-        CHECK(rndis_next_frame(&c, &frame, &length, &why) <= 0);
+        RndisFrameResult r = rndis_next_frame(&c, &frame, &length, &why);
+        CHECK(r == RNDIS_FRAMES_END || r == RNDIS_FRAMES_MALFORMED);
     }
 }
 
@@ -484,10 +502,10 @@ static void fuzz(void) {
         const uint8_t *frame;
         size_t length;
         const char *why;
-        int r;
+        RndisFrameResult r;
         unsigned guard = 0;
-        while ((r = rndis_next_frame(&c, &frame, &length, &why)) != 0 && guard++ < 1000)
-            if (r == 1) { volatile uint8_t sink = frame[length - 1]; (void)sink; }
+        while ((r = rndis_next_frame(&c, &frame, &length, &why)) != RNDIS_FRAMES_END && guard++ < 1000)
+            if (r == RNDIS_FRAME) { volatile uint8_t sink = frame[length - 1]; (void)sink; }
         CHECK(guard < 1000);
         BpfCursor b = {copy, n};
         bool truncated;
@@ -541,8 +559,25 @@ static void test_config(void) {
           !config_live("tx-batch") && !config_live("host-interface") && !config_live("peer-interface"));
     CHECK(!config_set(&c, "tx-batch", "0", why, sizeof why) && !config_set(&c, "tx-batch", "8x", why, sizeof why));
     CHECK(!config_set(&c, "tx-batch", "", why, sizeof why) && !config_set(&c, "verbose", "", why, sizeof why));
+    /* Digits only: the value is echoed in a suggested command line. */
+    CHECK(!config_set(&c, "tx-batch", " 8", why, sizeof why) && !config_set(&c, "tx-batch", "+8", why, sizeof why));
+    CHECK(!config_set(&c, "tx-batch", "\n8", why, sizeof why) && !config_set(&c, "tx-batch", "-1", why, sizeof why));
+    CHECK(config_set(&c, "tx-batch", "08", why, sizeof why) && c.tx_batch == 8);
     bool flag;
     CHECK(!config_parse_bool("paused", "maybe", &flag, why, sizeof why) && strstr(why, "paused must be yes or no"));
+
+    /* What the running service may change: a bad name or value says what is wrong; a
+     * setting that needs a restart says so; nothing changes unless it applies. */
+    config_defaults(&c);
+    d = c;
+    CHECK(!config_set_live(&c, "colour", "red", why, sizeof why) && strstr(why, "unknown setting"));
+    CHECK(!config_set_live(&c, "tx-batch", "99", why, sizeof why) && strstr(why, "1 to 32"));
+    CHECK(!config_set_live(&c, "prefer-phone", "maybe", why, sizeof why) && strstr(why, "yes or no"));
+    CHECK(!config_set_live(&c, "tx-batch", "8", why, sizeof why) && strstr(why, "starts again") &&
+          strstr(why, "sudo rndis-tether config tx-batch 8"));
+    CHECK(!memcmp(&c, &d, sizeof c));
+    CHECK(config_set_live(&c, "prefer-phone", "no", why, sizeof why) && !c.prefer_phone);
+    CHECK(config_set_live(&c, "verbose", "yes", why, sizeof why) && c.verbose);
 
     /* What config_save writes, config_load reads back unchanged. */
     char path[] = "/tmp/rndis-tether-selftest-XXXXXX";
@@ -578,9 +613,9 @@ static void test_config(void) {
 
 static void test_device_text(void) {
     char text[] = "A\nb=1\x1b[2J\x7f\xc2\x9b~ ", empty[] = "";
-    printable(text);
+    make_printable(text);
     CHECK(!strcmp(text, "A?b=1?[2J???~ "));
-    printable(empty);
+    make_printable(empty);
     CHECK(!empty[0]);
 }
 

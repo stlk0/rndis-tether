@@ -3,7 +3,8 @@
  *
  * RESET waits until every bulk OUT write has finished, sends RESET_MSG, restores the
  * packet filter if the phone asks for it, then lets traffic flow again. A second need
- * for RESET within 30 seconds, or three unanswered KEEPALIVEs, end the session.
+ * for RESET within RNDIS_RESET_WINDOW_S, or RNDIS_KEEPALIVE_MISSES unanswered
+ * KEEPALIVEs in a row, end the session (rndis.h).
  */
 #ifndef HEALTH_H
 #define HEALTH_H
@@ -17,7 +18,7 @@ typedef struct {
     void (*failed)(const char *reason, IOReturn status);
     uint32_t packet_filter;
     uint64_t last_heard_ms, last_reset_ms;
-    bool keepalive_outstanding, resetting, reset_queued, reset_attempted, stopped;
+    bool keepalive_outstanding, resetting, reset_queued, stopped;
     unsigned keepalive_failures, resets;
 } Health;
 

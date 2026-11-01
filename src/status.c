@@ -20,11 +20,22 @@ static void put(char **at, size_t *left, const char *format, ...) {
     *left -= used;
 }
 
+static const char *choose_state(const StatusFacts *f, const SessionStatus *s) {
+    if (f->paused) return STATUS_STATE_PAUSED; /* wins over every other state */
+    if (!f->phone) return STATUS_STATE_NO_PHONE;
+    if (f->rejected) return STATUS_STATE_UNSUPPORTED;
+    if (f->sleeping) return STATUS_STATE_SLEEPING;
+    if (s) {
+        if (s->address[0]) return STATUS_STATE_ONLINE;
+        return STATUS_STATE_CONNECTING;
+    }
+    if (f->last_failure[0]) return STATUS_STATE_RETRYING;
+    return STATUS_STATE_CONNECTING;
+}
+
 void status_choose(const StatusFacts *f, StatusReport *r) {
     const SessionStatus *s = f->paused ? NULL : f->session;
-    r->state = f->paused ? "paused" : !f->phone ? "no-phone" : f->rejected ? "unsupported" :
-               f->sleeping ? "sleeping" : s ? (s->address[0] ? "online" : "connecting") :
-               f->last_failure[0] ? "retrying" : "connecting";
+    r->state = choose_state(f, s);
     r->paused = f->paused;
     r->phone = f->phone;
     r->problem = f->phone && !s && !f->paused && f->last_failure[0] ? f->last_failure : NULL;
@@ -36,21 +47,24 @@ size_t status_format(const StatusReport *r, char *buffer, size_t size) {
     size_t left = size;
     if (size) buffer[0] = 0;
     put(&at, &left, "protocol=%d\nversion=%s\npid=%d\nstate=%s\nprefer-phone=%s\npaused=%s\n", STATUS_PROTOCOL,
-        VERSION, (int)getpid(), r->state, r->prefer_phone ? "yes" : "no", r->paused ? "yes" : "no");
+        VERSION, (int)getpid(), r->state, config_bool_text(r->prefer_phone), config_bool_text(r->paused));
     if (r->phone) put(&at, &left, "phone=%s\n", r->phone);
     const SessionStatus *s = r->session;
     if (s) {
-        const DataStats *t = &s->data;
+        const DataStats *stats = &s->data;
         put(&at, &left, "interface=%s\nconnected-since=%lld\n", s->interface, (long long)s->connected_at);
         if (s->address[0]) put(&at, &left, "address=%s\ngateway=%s\n", s->address, s->gateway);
         put(&at, &left, "primary=%s\n", s->primary);
         put(&at, &left, "rx-bytes=%llu\ntx-bytes=%llu\nrx-dropped=%llu\ntx-dropped=%llu\nusb-errors=%llu\n"
-            "resets=%u\n", t->rx_bytes, t->tx_bytes, t->rx_dropped, t->tx_dropped, s->usb_errors, s->resets);
+            "resets=%u\n", stats->rx_bytes, stats->tx_bytes, stats->rx_dropped, stats->tx_dropped,
+            s->usb_errors, s->resets);
     }
     if (r->problem) put(&at, &left, "problem=%s\n", r->problem);
     if (r->settings_problem) put(&at, &left, "settings-problem=%s\n", r->settings_problem);
     return size - left;
 }
+
+_Static_assert(RUNTIME_BACKLOG >= 2 * STATUS_ACCEPT_BATCH, "the backlog holds two batches of clients");
 
 typedef struct {
     int listener;
@@ -62,7 +76,7 @@ typedef struct {
  * The reply fits the socket buffer, so the write never blocks. */
 static void accept_some(void *context) {
     const Server *server = context;
-    char text[2048];
+    char text[STATUS_TEXT_SIZE];
     size_t n = 0;
     for (unsigned i = 0; i < STATUS_ACCEPT_BATCH; ++i) {
         int fd = accept(server->listener, NULL, NULL);

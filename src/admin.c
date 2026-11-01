@@ -12,8 +12,8 @@
 #include <unistd.h>
 
 #define REQUEST_MAX 256u
-#define REQUEST_TIMEOUT 2.0 /* seconds for a client to send its line */
-#define DENIED "error: only administrators of this Mac can change settings\n"
+#define REQUEST_TIMEOUT_S 2.0 /* for a client to send its line */
+#define DENIED_REPLY ADMIN_REPLY_ERROR ADMIN_DENIED_REASON "\n"
 
 /* One connection at a time: accepting pauses while a request is being read. */
 typedef struct {
@@ -53,12 +53,12 @@ static void finish(const char *reply) {
 
 static void answer(void) {
     char verb[8], name[64], value[64], extra, why[200], reply[300];
-    if (sscanf(a.request, "%7s %63s %63s %c", verb, name, value, &extra) != 3 || strcmp(verb, "set"))
-        strlcpy(reply, "error: expected \"set <name> <value>\"\n", sizeof reply);
+    if (sscanf(a.request, "%7s %63s %63s %c", verb, name, value, &extra) != 3 || strcmp(verb, ADMIN_VERB_SET))
+        strlcpy(reply, ADMIN_REPLY_ERROR "expected \"set <name> <value>\"\n", sizeof reply);
     else if (!a.set(a.uid, name, value, why, sizeof why))
-        snprintf(reply, sizeof reply, "error: %s\n", why);
+        snprintf(reply, sizeof reply, ADMIN_REPLY_ERROR "%s\n", why);
     else
-        strlcpy(reply, "ok\n", sizeof reply);
+        strlcpy(reply, ADMIN_REPLY_OK, sizeof reply);
     finish(reply);
 }
 
@@ -77,7 +77,7 @@ static void readable(void *context) {
         *end = 0;
         answer();
     } else if (a.used == sizeof a.request - 1) {
-        finish("error: request too long\n");
+        finish(ADMIN_REPLY_ERROR "request too long\n");
     }
 }
 
@@ -95,12 +95,15 @@ static void accept_one(void *context) {
     gid_t group;
     (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
     if (getpeereid(fd, &a.uid, &group) || !admin_allowed(a.uid, a.gid)) {
-        (void)write(fd, DENIED, sizeof DENIED - 1);
+        (void)write(fd, DENIED_REPLY, sizeof DENIED_REPLY - 1);
         close(fd);
         return;
     }
-    a.reading = fcntl(fd, F_SETFD, FD_CLOEXEC) || fcntl(fd, F_SETFL, O_NONBLOCK) ? NULL :
-                dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, (uintptr_t)fd, 0, dispatch_get_main_queue());
+    if (fcntl(fd, F_SETFD, FD_CLOEXEC) || fcntl(fd, F_SETFL, O_NONBLOCK)) {
+        close(fd);
+        return;
+    }
+    a.reading = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, (uintptr_t)fd, 0, dispatch_get_main_queue());
     if (!a.reading) {
         close(fd);
         return;
@@ -112,7 +115,7 @@ static void accept_one(void *context) {
     dispatch_source_set_cancel_handler_f(a.reading, close_connection);
     dispatch_suspend(a.accepting);
     dispatch_resume(a.reading);
-    timer_set(a.timeout, REQUEST_TIMEOUT);
+    timer_set(a.timeout, REQUEST_TIMEOUT_S);
 }
 
 bool admin_serve(const char *dir, const char *path, gid_t gid, AdminSet set) {

@@ -18,12 +18,15 @@
 #define RX_SLOTS 4u         /* bulk IN reads kept in flight */
 #define TX_SLOTS 128u       /* bulk OUT writes that may be in flight */
 #define TX_READ_MIN 48u     /* read macOS frames only with this many free slots */
-#define TX_BUFFER 16384u
-#define BPF_BUFFER (32u * 1024u)
+#define TX_BUFFER 16384u         /* one bulk OUT transfer; tx_limit stays below it */
+#define BPF_BUFFER (32u * 1024u) /* largest BPF read buffer we ask for */
 
 typedef struct {
     uint64_t rx_frames, rx_bytes, tx_frames, tx_bytes, rx_transfers, tx_transfers;
-    uint64_t rx_dropped, tx_dropped, rx_malformed, usb_errors, bpf_errors;
+    uint64_t rx_dropped, tx_dropped; /* frames */
+    uint64_t rx_malformed;           /* bulk IN transfers cut short by a malformed message */
+    uint64_t usb_errors;             /* failed bulk transfers */
+    uint64_t bpf_errors;             /* frames lost in failed BPF writes */
 } DataStats;
 
 typedef struct {
@@ -34,9 +37,9 @@ typedef struct {
 } DatapathEvents;
 
 typedef struct {
-    unsigned mtu, batch_limit;        /* packets per bulk OUT transfer */
-    uint32_t max_transfer, alignment_shift;
-    bool link_down;
+    unsigned mtu;         /* the phone's, at most ETHERMTU */
+    unsigned batch_limit; /* packets per bulk OUT transfer */
+    uint32_t max_transfer, alignment_shift; /* from REMOTE_NDIS_INITIALIZE_CMPLT */
 } DatapathLimits;
 
 typedef struct Datapath Datapath;
@@ -50,7 +53,8 @@ typedef struct {
 typedef struct {
     UsbTransfer usb;
     Datapath *owner;
-    size_t used, bytes;
+    size_t used;        /* bytes in buffer: RNDIS messages and their padding */
+    size_t frame_bytes; /* the Ethernet frames among them, for the statistics */
     unsigned packets;
     uint8_t buffer[TX_BUFFER];
 } TxSlot;
@@ -59,14 +63,15 @@ struct Datapath {
     UsbLink *usb;
     const DatapathEvents *events;
     DatapathLimits limits;
-    size_t tx_limit; /* bytes per bulk OUT transfer, a terminating zero byte included */
+    size_t tx_limit; /* RNDIS message bytes from rndis_transfer_limit; leaves room for the terminating zero byte */
     bool stopped, link_down, held;
 
     int bpf;
     unsigned bpf_size;
     bool bpf_batch; /* several frames per write() to BPF */
+    unsigned bpf_failed_writes; /* one per failed write(), however many frames it carried */
     dispatch_source_t source;
-    bool suspended;
+    bool bpf_suspended; /* the BPF read source (not the data path) is suspended */
 
     TxSlot *free_tx[TX_SLOTS];
     unsigned free_count;

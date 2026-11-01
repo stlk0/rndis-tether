@@ -13,6 +13,12 @@
 #include <stddef.h>
 #include <sys/types.h>
 
+#define ADMIN_VERB_SET "set"
+#define ADMIN_REPLY_OK "ok\n"
+#define ADMIN_REPLY_ERROR "error: " /* followed by the reason and a newline */
+#define ADMIN_DENIED_REASON "only administrators of this Mac can change settings"
+#define ADMIN_SETTING_PAUSED "paused" /* runtime only, never saved in the settings file */
+
 /* Applies one setting for user uid; false and why when it is refused. */
 typedef bool (*AdminSet)(uid_t uid, const char *name, const char *value, char *why, size_t why_size);
 

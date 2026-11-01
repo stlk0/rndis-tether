@@ -2,7 +2,7 @@
 #include "clock.h"
 #include "log.h"
 
-#define RESET_DRAIN_MS 5000u /* bulk OUT must finish this soon after RESET is decided */
+#define RESET_DRAIN_MS USB_WRITE_TIMEOUT_MS /* every write in flight before RESET has completed by then */
 
 void health_start(Health *h, Control *c, Datapath *d, uint32_t packet_filter,
                   void (*failed)(const char *reason, IOReturn status)) {
@@ -20,30 +20,38 @@ void health_heard(Health *h) {
 
 /* --------------------------------------------------------------------- RESET */
 
+/* A RESET step that did not succeed ends the session; a phone's refusal is logged with its status. */
+static void step_failed(Health *h, ControlResult result, uint32_t status, const char *what, const char *reason) {
+    if (result == CONTROL_DEVICE_STATUS) logmsg("%s rejected: 0x%08x", what, status);
+    h->failed(reason, result == CONTROL_USB_ERROR ? (IOReturn)status : kIOReturnSuccess);
+}
+
+static void resume_traffic(Health *h) {
+    h->resetting = false;
+    logmsg("soft RESET completed; resuming transmission");
+    datapath_hold(h->data, false);
+}
+
 static void filter_restored(void *context, ControlResult result, uint32_t status, uint32_t addressing_reset) {
     (void)addressing_reset;
     Health *h = context;
     if (h->stopped) return;
     if (result != CONTROL_SUCCESS) {
-        if (result == CONTROL_DEVICE_STATUS) logmsg("reset filter rejected: 0x%08x", status);
-        h->failed("cannot restore packet filter after RESET", result == CONTROL_USB_ERROR ? (IOReturn)status : 0);
+        step_failed(h, result, status, "reset filter", "cannot restore packet filter after RESET");
         return;
     }
-    h->resetting = false;
-    logmsg("soft RESET completed; resuming transmission");
-    datapath_hold(h->data, false);
+    resume_traffic(h);
 }
 
 static void reset_done(void *context, ControlResult result, uint32_t status, uint32_t addressing_reset) {
     Health *h = context;
     if (h->stopped) return;
     if (result != CONTROL_SUCCESS) {
-        if (result == CONTROL_DEVICE_STATUS) logmsg("RESET rejected: 0x%08x", status);
-        h->failed("soft RESET failed", result == CONTROL_USB_ERROR ? (IOReturn)status : 0);
+        step_failed(h, result, status, "RESET", "soft RESET failed");
         return;
     }
     if (!addressing_reset) {
-        filter_restored(h, CONTROL_SUCCESS, 0, 0);
+        resume_traffic(h);
         return;
     }
     ControlMessage m = {.type = RNDIS_SET_MSG, .id = control_next_id(), .done = filter_restored, .context = h};
@@ -63,13 +71,13 @@ static void queue_reset(Health *h) {
 void health_reset(Health *h, const char *reason) {
     if (h->stopped) return;
     uint64_t now = now_ms();
-    RndisHealthAction action = rndis_reset_decision(now, h->last_reset_ms, h->reset_attempted, h->resetting);
+    RndisHealthAction action = rndis_reset_decision(now, h->last_reset_ms, h->resets > 0, h->resetting);
     if (action == RNDIS_HEALTH_OK) return;
     if (action == RNDIS_HEALTH_RESTART) {
-        h->failed("another RESET needed within 30 seconds", kIOReturnSuccess);
+        h->failed("another RESET needed within " NUMBER_TEXT(RNDIS_RESET_WINDOW_S) " seconds", kIOReturnSuccess);
         return;
     }
-    h->reset_attempted = h->resetting = true;
+    h->resetting = true;
     h->reset_queued = false;
     h->last_reset_ms = now;
     ++h->resets;
@@ -84,7 +92,8 @@ void health_drained(Health *h) {
 
 /* ----------------------------------------------------------------- KEEPALIVE */
 
-/* Traffic may have resumed while KEEPALIVE waited behind another request. */
+/* Traffic may have resumed while KEEPALIVE waited behind another request. This KEEPALIVE
+ * is the outstanding one, so only the silence is asked about. */
 static bool keepalive_wanted(void *context) {
     Health *h = context;
     return !h->resetting && rndis_keepalive_due(now_ms(), h->last_heard_ms, false);
@@ -95,11 +104,11 @@ static void keepalive_done(void *context, ControlResult result, uint32_t status,
     Health *h = context;
     h->keepalive_outstanding = false;
     if (h->stopped || result == CONTROL_SKIPPED) return;
-    RndisHealthAction action = rndis_keepalive_result(&h->keepalive_failures,
-        result == CONTROL_SUCCESS || result == CONTROL_DEVICE_STATUS, status);
+    bool answered = result == CONTROL_SUCCESS || result == CONTROL_DEVICE_STATUS; /* maybe with an error status */
+    RndisHealthAction action = rndis_keepalive_result(&h->keepalive_failures, answered, status);
     if (action == RNDIS_HEALTH_RESET) health_reset(h, "phone rejected KEEPALIVE");
     else if (action == RNDIS_HEALTH_RESTART) h->failed("phone stopped responding to keepalive", kIOReturnSuccess);
-    else if (result != CONTROL_SUCCESS) logdebug("keepalive failed (%u/3)", h->keepalive_failures);
+    else if (result != CONTROL_SUCCESS) logdebug("keepalive failed (%u/%u)", h->keepalive_failures, RNDIS_KEEPALIVE_MISSES);
     else logdebug("keepalive answered");
 }
 

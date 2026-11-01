@@ -144,9 +144,9 @@ static void test_tx_batching(void) {
     const uint8_t *frame = NULL;
     size_t length = 0;
     const char *why = NULL;
-    CHECK(rndis_next_frame(&cursor, &frame, &length, &why) == 1 && length == sizeof a && !memcmp(frame, a, sizeof a));
-    CHECK(rndis_next_frame(&cursor, &frame, &length, &why) == 1 && length == sizeof b && !memcmp(frame, b, sizeof b));
-    CHECK(rndis_next_frame(&cursor, &frame, &length, &why) == 0);
+    CHECK(rndis_next_frame(&cursor, &frame, &length, &why) == RNDIS_FRAME && length == sizeof a && !memcmp(frame, a, sizeof a));
+    CHECK(rndis_next_frame(&cursor, &frame, &length, &why) == RNDIS_FRAME && length == sizeof b && !memcmp(frame, b, sizeof b));
+    CHECK(rndis_next_frame(&cursor, &frame, &length, &why) == RNDIS_FRAMES_END);
     complete_write(kIOReturnSuccess);
     CHECK(data.free_count == TX_SLOTS && data.stats.tx_frames == 2 && data.stats.tx_transfers == 1);
 
@@ -200,6 +200,25 @@ static void test_rx_delivery(void) {
     CHECK(read(macos, got, sizeof got) == (ssize_t)sizeof b && !memcmp(got, b, sizeof b));
     CHECK(data.stats.rx_frames == 2 && data.stats.rx_transfers == 1 && heard == 1);
     CHECK(read_count == RX_SLOTS + 1 && reads[RX_SLOTS] == reads[0]); /* the read is armed again */
+}
+
+/* A failed batch write costs all its frames but counts as one failure towards the log limit. */
+static void test_rx_bpf_write_failure(void) {
+    fixture(23700, 15);
+    data.bpf_batch = true; /* sockets do not take the ioctl; bpf_put builds the records anyway */
+    int one = 1;
+    (void)setsockopt(data.bpf, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+    close(macos);
+    macos = -1;
+    RxSlot *slot = USB_OWNER(reads[0], RxSlot, usb);
+    uint8_t frame[1514];
+    make_frame(frame, sizeof frame, 6);
+    size_t used = 0;
+    for (unsigned i = 0; i < 6; ++i)
+        used += rndis_append_packet(slot->buffer, used, sizeof slot->buffer, frame, sizeof frame, 0);
+    reads[0]->done(reads[0], kIOReturnSuccess, used);
+    CHECK(data.stats.bpf_errors == 6 && data.bpf_failed_writes == 1 && !data.stats.rx_frames);
+    CHECK(data.bpf_batch && !failed);
 }
 
 static void test_rx_abort_storm(void) {
@@ -392,13 +411,13 @@ static int connect_to(const char *path) {
 static void test_runtime(void) {
     strlcpy(socket_dir, "/tmp/rndis-tether-test-XXXXXX", sizeof socket_dir);
     CHECK(mkdtemp(socket_dir) != NULL);
-    CHECK(runtime_dir(socket_dir)); /* mkdtemp makes it 0700 */
+    CHECK(runtime_dir_ready(socket_dir)); /* mkdtemp makes it 0700 */
     char path[128], other[128];
     snprintf(path, sizeof path, "%s/open", socket_dir);
-    CHECK(!mkdir(path, 0755) && !runtime_dir(path) && errno == EPERM);
+    CHECK(!mkdir(path, 0755) && !runtime_dir_ready(path) && errno == EPERM);
     CHECK(!rmdir(path));
     snprintf(path, sizeof path, "%s/new", socket_dir);
-    CHECK(runtime_dir(path) && runtime_dir(path)); /* made, then found */
+    CHECK(runtime_dir_ready(path) && runtime_dir_ready(path)); /* made, then found */
     CHECK(!rmdir(path));
 
     /* Whatever is at the public name is replaced, never followed: a symlink to someone
@@ -546,6 +565,7 @@ int main(void) {
     test_tx_batching();
     test_tx_transfer_limit();
     test_rx_delivery();
+    test_rx_bpf_write_failure();
     test_rx_abort_storm();
     test_reset_during_batch_flush();
     test_reset_filter_restore();

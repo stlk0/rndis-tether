@@ -7,6 +7,8 @@ NETIF_FRAMEWORKS = -framework CoreFoundation -framework SystemConfiguration
 SOURCES = $(addprefix src/,main.c daemon.c session.c health.c control.c datapath.c status.c admin.c usb.c \
           netif.c runtime.c rndis.c cli.c config.c log.c clock.c)
 HEADERS = $(wildcard src/*.h)
+# Fixed name: install.sh downloads it from .../releases/latest/download/.
+ARCHIVE = rndis-tether-macos.tar.gz
 VERSION := $(shell sed -n 's/^\#define VERSION "\(.*\)"/\1/p' src/config.h)
 
 .PHONY: all check asan analyze dist clean
@@ -22,7 +24,7 @@ rndis-tether: $(SOURCES) $(HEADERS)
 # front instead. `make asan` runs the same tests under AddressSanitizer where it works.
 TEST_CFLAGS = $(CFLAGS) -Isrc -O1 -fno-omit-frame-pointer -fsanitize=undefined -fno-sanitize-recover=all
 GMALLOC = DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib MALLOC_STRICT_SIZE=1
-TESTS = rndis-tether-selftest rndis-tether-controltest rndis-tether-sessiontest
+TESTS = rndis-tether-selftest rndis-tether-controltest rndis-tether-sessiontest rndis-tether-bringuptest
 
 # Pure parsers, the fuzzer, BPF records, the settings file and the interface marker.
 SELFTEST = tests/selftest.c $(addprefix src/,config.c log.c rndis.c netif.c runtime.c)
@@ -41,16 +43,22 @@ SESSIONTEST = tests/sessiontest.c $(addprefix src/,datapath.c health.c status.c 
 rndis-tether-sessiontest: $(SESSIONTEST) $(HEADERS)
 	$(CC) $(TEST_CFLAGS) $(SESSIONTEST) $(FRAMEWORKS) -o $@
 
+# One connection: bring-up, the feth pair and teardown over a fake phone and network.
+BRINGUPTEST = tests/bringuptest.c $(addprefix src/,session.c control.c health.c datapath.c rndis.c log.c config.c)
+rndis-tether-bringuptest: $(BRINGUPTEST) $(HEADERS)
+	$(CC) $(TEST_CFLAGS) $(BRINGUPTEST) $(FRAMEWORKS) -o $@
+
 check: $(TESTS)
 	for t in $(TESTS); do $(GMALLOC) ./$$t && $(GMALLOC) MALLOC_PROTECT_BEFORE=1 ./$$t || exit 1; done
 
 ASAN_CFLAGS = $(TEST_CFLAGS) -fsanitize=address
-asan: $(SELFTEST) $(CONTROLTEST) $(SESSIONTEST) $(HEADERS)
+asan: $(SELFTEST) $(CONTROLTEST) $(SESSIONTEST) $(BRINGUPTEST) $(HEADERS)
 	mkdir -p asan
 	$(CC) $(ASAN_CFLAGS) $(SELFTEST) $(NETIF_FRAMEWORKS) -o asan/selftest
 	$(CC) $(ASAN_CFLAGS) $(CONTROLTEST) $(FRAMEWORKS) -o asan/controltest
 	$(CC) $(ASAN_CFLAGS) $(SESSIONTEST) $(FRAMEWORKS) -o asan/sessiontest
-	for t in selftest controltest sessiontest; do ./asan/$$t || exit 1; done
+	$(CC) $(ASAN_CFLAGS) $(BRINGUPTEST) $(FRAMEWORKS) -o asan/bringuptest
+	for t in selftest controltest sessiontest bringuptest; do ./asan/$$t || exit 1; done
 
 # Diagnostic: creates feth60/feth61 and checks that BPF on the driver side sees
 # what macOS sends (needs root). Not part of the daemon.
@@ -63,15 +71,15 @@ analyze:
 	$(CC) --analyze -Xanalyzer -analyzer-output=text -Xanalyzer -analyzer-werror $(CFLAGS) $(SOURCES)
 
 # Release archive: one universal (Apple silicon + Intel) binary, ad-hoc signed as arm64
-# requires, plus its SHA-256. The fixed name serves .../releases/latest/download/.
+# requires, plus its SHA-256.
 dist: $(SOURCES) $(HEADERS)
 	rm -rf dist && mkdir -p dist/pkg
 	$(CC) $(CFLAGS) -O2 -arch arm64 -arch x86_64 $(SOURCES) $(FRAMEWORKS) -o dist/pkg/rndis-tether
 	codesign --force --sign - dist/pkg/rndis-tether
 	cp LICENSE dist/pkg/
-	tar -czf dist/rndis-tether-macos.tar.gz -C dist/pkg rndis-tether LICENSE
-	cd dist && shasum -a 256 rndis-tether-macos.tar.gz > rndis-tether-macos.tar.gz.sha256
-	@echo "dist/rndis-tether-macos.tar.gz: rndis-tether $(VERSION), $$(lipo -archs dist/pkg/rndis-tether)"
+	tar -czf dist/$(ARCHIVE) -C dist/pkg rndis-tether LICENSE
+	cd dist && shasum -a 256 $(ARCHIVE) > $(ARCHIVE).sha256
+	@echo "dist/$(ARCHIVE): rndis-tether $(VERSION), $$(lipo -archs dist/pkg/rndis-tether)"
 
 clean:
 	rm -rf rndis-tether $(TESTS) bpf-feth-test dist asan *.dSYM *.plist

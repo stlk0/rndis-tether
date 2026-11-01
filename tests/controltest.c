@@ -193,7 +193,7 @@ static void test_notifications_and_device_keepalive(void) {
     fixture();
     queue_keepalive(42);
     control_kick(&control);
-    control.notified = true; /* a notification before SEND's completion must not be lost */
+    control.response_waiting = true; /* a notification before SEND's completion must not be lost */
     control_kick(&control);
     CHECK(submissions == 1);
     complete(0, NULL, 12);
@@ -207,7 +207,7 @@ static void test_notifications_and_device_keepalive(void) {
     CHECK(rndis_control_type(control.current.bytes, 16) == (RNDIS_KEEPALIVE_MSG | RNDIS_COMPLETION));
     complete(0, NULL, 16);
     complete(0, NULL, 0);
-    control.notified = true;
+    control.response_waiting = true;
     control_kick(&control);
     CHECK(control.state == CONTROL_GET && !control.busy);
     uint8_t indication[20] = {0};
@@ -217,6 +217,31 @@ static void test_notifications_and_device_keepalive(void) {
     complete(0, indication, sizeof indication);
     CHECK(messages == 2 && last_message_type == RNDIS_INDICATE_STATUS_MSG);
     complete(0, NULL, 0);
+
+    /* A failed GET leaves its response on the phone and no new notification announces
+     * it: the GET is tried again, also while idle, a bounded number of times. */
+    unsigned before = submissions;
+    control.response_waiting = true;
+    control_kick(&control);
+    CHECK(submissions == before + 1 && control.state == CONTROL_GET);
+    complete(kIOReturnError, NULL, 0);
+    CHECK(!control.pending && control.response_waiting);
+    control_kick(&control);
+    CHECK(submissions == before + 2);
+    complete(0, indication, sizeof indication);
+    CHECK(messages == 3 && !control.get_errors_row);
+    complete(0, NULL, 0);
+    before = submissions;
+    control.response_waiting = true;
+    control_kick(&control);
+    for (unsigned i = 0; i < CONTROL_GET_RETRIES; ++i) {
+        complete(kIOReturnError, NULL, 0);
+        control_kick(&control);
+    }
+    CHECK(submissions == before + 1 + CONTROL_GET_RETRIES);
+    complete(kIOReturnError, NULL, 0);
+    control_kick(&control);
+    CHECK(submissions == before + 1 + CONTROL_GET_RETRIES && !control.pending && !control.response_waiting);
 }
 
 static void test_timeouts_and_stop(void) {
@@ -261,7 +286,7 @@ static void test_errors_and_priority(void) {
     complete(0, NULL, 16);
     CHECK(control.current.type == RNDIS_RESET_MSG);
     complete(0, NULL, 12);
-    control.notified = true;
+    control.response_waiting = true;
     control_kick(&control);
     uint8_t reset_reply[16] = {0};
     rndis_put32(reset_reply, RNDIS_RESET_MSG | RNDIS_COMPLETION);
@@ -304,7 +329,7 @@ static void test_failures(void) {
     queue_keepalive(42);
     control_kick(&control);
     complete(0, NULL, 12);
-    control.notified = true;
+    control.response_waiting = true;
     control_kick(&control);
     uint8_t short_reply[12];
     rndis_build_keepalive(short_reply, 42);
@@ -319,6 +344,17 @@ static void test_failures(void) {
     one_more.length = rndis_build_keepalive(one_more.bytes, 99);
     CHECK(!control_send(&control, &one_more, false));
     CHECK(failed == 1 && control.count == CONTROL_QUEUE && callbacks == 1);
+
+    /* The interrupt endpoint gives up after USB_ERROR_BURST failed reads in a row, as the
+     * bulk pipes do; a good read in between starts the count again. */
+    fixture();
+    UsbTransfer *notify = &control.notify_transfer;
+    for (unsigned i = 0; i + 1 < USB_ERROR_BURST; ++i) notify->done(notify, kIOReturnError, 0);
+    notify->done(notify, kIOReturnSuccess, 0);
+    for (unsigned i = 0; i + 1 < USB_ERROR_BURST; ++i) notify->done(notify, kIOReturnError, 0);
+    CHECK(!failed && notify_reads == 2 * USB_ERROR_BURST);
+    notify->done(notify, kIOReturnError, 0);
+    CHECK(failed == 1 && !strcmp(failed_reason, "notification endpoint keeps failing"));
 }
 
 static void test_exchange(void) {
@@ -368,6 +404,17 @@ static void test_exchange(void) {
                          &n, &status);
     CHECK(!e && n == sizeof completion && rndis_le32(response + 8) == 79);
     CHECK(messages == messages_before + 1 && last_message_type == RNDIS_INDICATE_STATUS_MSG && test_now == started);
+
+    /* The completion first: the indication behind it is handled too, the completion is returned. */
+    rndis_build_keepalive_cmplt(both, 80);
+    memcpy(both + sizeof completion, indication, sizeof indication);
+    script_next = 0;
+    script_count = 1;
+    messages_before = messages;
+    e = control_exchange(&control, request, rndis_build_keepalive(request, 80), RNDIS_KEEPALIVE_MSG, 80, response,
+                         &n, &status);
+    CHECK(!e && n == sizeof completion && rndis_le32(response + 8) == 80);
+    CHECK(messages == messages_before + 1 && last_message_type == RNDIS_INDICATE_STATUS_MSG);
 }
 
 int main(void) {

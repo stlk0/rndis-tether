@@ -45,7 +45,7 @@ brew install stlk0/tap/rndis-tether
 sudo rndis-tether install
 ```
 
-Either way, the installer ends with `rndis-tether 1.1.0 is installed` and the current
+Either way, the installer ends with `rndis-tether 1.1.1 is installed` and the current
 status. macOS may show a notification "Background Items Added": that is rndis-tether,
 leave it allowed.
 
@@ -324,7 +324,8 @@ Security problems: please report them privately, see [SECURITY.md](SECURITY.md).
 
 ### Limitations
 
-- One phone at a time; a second one is ignored while the first is connected.
+- One phone at a time: the first one plugged in is used until it is unplugged, also while
+  disconnected with `rndis-tether disconnect`; a second one is ignored until then.
 - The connection is a temporary macOS network service, so it does not appear in
   System Settings > Network.
 - Only phones that use RNDIS for USB tethering. Some newer phones can also use CDC NCM,

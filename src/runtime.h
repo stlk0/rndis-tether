@@ -12,7 +12,10 @@
 
 /* Creates dir for this user only, or checks that an existing one is just that; false
  * with errno EPERM when it is not. */
-bool runtime_dir(const char *dir);
+bool runtime_dir_ready(const char *dir);
+
+#define RUNTIME_BACKLOG 16 /* connections waiting to be accepted (status.c checks against STATUS_ACCEPT_BATCH) */
+
 /* A non-blocking listening socket at path, owned by group gid with mode, prepared in
  * dir and renamed over whatever is at path. The descriptor, or -1. */
 int runtime_listen(const char *dir, const char *path, gid_t gid, mode_t mode);
@@ -22,7 +25,8 @@ int runtime_listen(const char *dir, const char *path, gid_t gid, mode_t mode);
 bool runtime_mark_interfaces(const char *marker, const char *host, const char *peer);
 /* The pair a marker names; false when there is none or it is not two valid names. */
 bool runtime_marked_interfaces(const char *marker, char host[IFNAMSIZ], char peer[IFNAMSIZ]);
-/* Destroys the marked pair; the marker goes once neither interface exists. */
+/* Destroys the marked pair; the marker goes once neither interface exists, and at once
+ * when it names no valid pair. */
 void runtime_destroy_interfaces(const char *marker);
 
 #endif
