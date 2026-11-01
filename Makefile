@@ -1,7 +1,10 @@
 CC = clang
 # Homebrew builds with WERROR= so a newer compiler's new warnings do not break installs.
 WERROR ?= -Werror
-CFLAGS = -std=c11 -Wall -Wextra $(WERROR) -Wpedantic -mmacosx-version-min=13.0 -g
+# Clean today; each one guards a mistake that compiles silently (-Wshadow hid a test's failures).
+WARNINGS = -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wimplicit-fallthrough -Wstrict-prototypes \
+           -Wmissing-prototypes
+CFLAGS = -std=c11 $(WARNINGS) $(WERROR) -mmacosx-version-min=13.0 -g
 FRAMEWORKS = -framework IOKit -framework CoreFoundation -framework SystemConfiguration
 NETIF_FRAMEWORKS = -framework CoreFoundation -framework SystemConfiguration
 SOURCES = $(addprefix src/,main.c daemon.c session.c health.c control.c datapath.c status.c admin.c usb.c \
