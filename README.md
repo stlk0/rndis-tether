@@ -7,6 +7,10 @@ the phone, turn on USB tethering, and the Mac is online, as if you had plugged i
 network cable. It starts by itself, survives sleep, unplugging and restarts, and needs
 no window or menu.
 
+Prefer an icon in the menu bar? [RNDIS Tether](https://github.com/stlk0/rndis-tether-app)
+is a menu bar app for rndis-tether: it installs the service for you and shows whether
+the phone is connected and how fast the internet through it is.
+
 ![rndis-tether monitor: a Galaxy S25 is plugged in, connects within seconds and runs a speed test at about 500 Mbit/s](docs/demo.gif)
 
 ## What you need
@@ -45,7 +49,7 @@ brew install stlk0/tap/rndis-tether
 sudo rndis-tether install
 ```
 
-Either way, the installer ends with `rndis-tether 1.1.1 is installed` and the current
+Either way, the installer ends with `rndis-tether 1.2.0 is installed` and the current
 status. macOS may show a notification "Background Items Added": that is rndis-tether,
 leave it allowed.
 
@@ -133,6 +137,7 @@ few seconds.
 | Online, but websites do not open | Check that the phone itself has internet (mobile data on, not out of data). |
 | *Internet: goes through …, which macOS ranks above the phone* | A VPN that takes all traffic is on. That is fine: the VPN itself normally runs over the phone. |
 | *The service is installed but not running* | Run `sudo rndis-tether install` again. |
+| *The service is busy* | It is connecting to the phone or disconnecting from it and answers again in a few seconds. If it stays busy, unplug the phone. |
 | The phone does not appear in *System Settings > Network* | That is expected: rndis-tether sets the connection up on its own. |
 
 If you are stuck, open an [issue](https://github.com/stlk0/rndis-tether/issues) and
@@ -187,9 +192,10 @@ apps -> macOS TCP/IP -> feth50 (DHCP from the phone, via macOS's own ipconfig)
                         feth51 <- BPF -> rndis-tether -> USB bulk <-> phone (RNDIS)
 ```
 
-- A LaunchDaemon waits for an RNDIS function (USB interface class `e0/01/03`, or the
-  Android variant `02/02/ff`; real CDC-ACM modems are filtered out by their
-  descriptors). It opens the interfaces normally, so ADB on the same phone keeps working.
+- A LaunchDaemon waits for an RNDIS function (USB interface class `e0/01/03` or
+  `ef/04/01`, or the Android variant `02/02/ff`; real CDC-ACM modems are filtered out by
+  their descriptors). It opens the interfaces normally, so ADB on the same phone keeps
+  working.
 - It speaks RNDIS to the phone over IOKit and moves Ethernet frames to a `feth` pair
   through BPF. macOS sees an ordinary Ethernet interface: its own DHCP client, DNS and
   lease renewals do the rest.
@@ -250,8 +256,9 @@ and start it again afterwards with `sudo rndis-tether install`.
 
 ### For other programs
 
-The service answers on two UNIX sockets, so another program (a menu bar app, a script)
-can show its state and change settings without `sudo`. Both belong to root; a careful
+The service answers on two UNIX sockets, so another program (a menu bar app such as
+[RNDIS Tether](https://github.com/stlk0/rndis-tether-app), a script) can show its state
+and change settings without `sudo`. Both belong to root; a careful
 client checks that with `getpeereid()` after connecting, as `rndis-tether` itself does.
 
 **Status**, `/var/run/rndis-tether.sock`, readable by everyone. Connect and read until
@@ -279,6 +286,10 @@ names you do not know.
 with or without a phone. `state` may gain new values; treat an unknown one as not
 connected and show it as is. Speed is the difference between two readings of
 `rx-bytes`/`tx-bytes`; the counters start from zero with every connection.
+
+While the service connects to a phone or disconnects from it, it may take a few seconds
+to answer. `rndis-tether status --raw` waits two seconds and then prints `state=busy`;
+it prints `state=not-running` when nothing listens on the socket.
 
 **Settings**, `/var/run/rndis-tether-admin.sock`, owned by `root:admin` with mode `0660`:
 only root and administrators can connect, and the service checks the caller again.
@@ -331,8 +342,8 @@ Security problems: please report them privately, see [SECURITY.md](SECURITY.md).
 - Only phones that use RNDIS for USB tethering. Some newer phones can also use CDC NCM,
   which macOS supports natively: such a phone works without rndis-tether, and
   `rndis-tether list` does not show it.
-- Tested with a Samsung Galaxy S25 and a OnePlus 7 Pro, on Apple silicon and Intel Macs.
-  Reports about other phones and Macs are welcome.
+- Tested with a Samsung Galaxy S25 and a OnePlus 7 Pro, on Apple silicon and Intel Macs;
+  a Xiaomi 14 is reported to work. Reports about other phones and Macs are welcome.
 
 ### Credits
 

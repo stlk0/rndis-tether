@@ -10,7 +10,7 @@
 #include <stddef.h>
 #include <stdio.h>
 
-#define VERSION "1.1.1"
+#define VERSION "1.2.0"
 #define LABEL "io.github.stlk0.rndis-tether"           /* launchd label and log subsystem */
 #define SERVICE_TARGET "system/" LABEL /* launchctl's name for the service */
 #define HELPER_DIR "/Library/PrivilegedHelperTools" /* root-owned; launchd runs the copy here */

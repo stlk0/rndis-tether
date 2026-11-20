@@ -27,7 +27,7 @@ static void step_failed(Health *h, ControlResult result, uint32_t status, const 
 }
 
 static void resume_traffic(Health *h) {
-    h->resetting = false;
+    h->reset = RESET_IDLE;
     logmsg("soft RESET completed; resuming transmission");
     datapath_hold(h->data, false);
 }
@@ -56,29 +56,29 @@ static void reset_done(void *context, ControlResult result, uint32_t status, uin
     }
     ControlMessage m = {.type = RNDIS_SET_MSG, .id = control_next_id(), .done = filter_restored, .context = h};
     m.length = rndis_build_set_u32(m.bytes, m.id, OID_GEN_CURRENT_PACKET_FILTER, h->packet_filter);
+    h->reset = RESET_FILTER;
     (void)control_send(h->control, &m, false);
 }
 
 /* RESET goes out only after every bulk OUT write already submitted has finished. */
 static void queue_reset(Health *h) {
-    if (h->stopped || !h->resetting || h->reset_queued || !datapath_drained(h->data)) return;
+    if (h->stopped || h->reset != RESET_DRAINING || !datapath_drained(h->data)) return;
     ControlMessage m = {.type = RNDIS_RESET_MSG, .done = reset_done, .context = h};
     m.length = rndis_build_reset(m.bytes);
-    h->reset_queued = true;
+    h->reset = RESET_SENT;
     (void)control_send(h->control, &m, false);
 }
 
 void health_reset(Health *h, const char *reason) {
     if (h->stopped) return;
     uint64_t now = now_ms();
-    RndisHealthAction action = rndis_reset_decision(now, h->last_reset_ms, h->resets > 0, h->resetting);
+    RndisHealthAction action = rndis_reset_decision(now, h->last_reset_ms, h->resets > 0, h->reset != RESET_IDLE);
     if (action == RNDIS_HEALTH_OK) return;
     if (action == RNDIS_HEALTH_RESTART) {
         h->failed("another RESET needed within " NUMBER_TEXT(RNDIS_RESET_WINDOW_S) " seconds", kIOReturnSuccess);
         return;
     }
-    h->resetting = true;
-    h->reset_queued = false;
+    h->reset = RESET_DRAINING;
     h->last_reset_ms = now;
     ++h->resets;
     logmsg("soft RESET: %s", reason);
@@ -96,7 +96,7 @@ void health_drained(Health *h) {
  * is the outstanding one, so only the silence is asked about. */
 static bool keepalive_wanted(void *context) {
     Health *h = context;
-    return !h->resetting && rndis_keepalive_due(now_ms(), h->last_heard_ms, false);
+    return h->reset == RESET_IDLE && rndis_keepalive_due(now_ms(), h->last_heard_ms, false);
 }
 
 static void keepalive_done(void *context, ControlResult result, uint32_t status, uint32_t addressing_reset) {
@@ -115,13 +115,13 @@ static void keepalive_done(void *context, ControlResult result, uint32_t status,
 void health_tick(Health *h) {
     if (h->stopped) return;
     uint64_t now = now_ms();
-    if (!h->resetting && rndis_keepalive_due(now, h->last_heard_ms, h->keepalive_outstanding)) {
+    if (h->reset == RESET_IDLE && rndis_keepalive_due(now, h->last_heard_ms, h->keepalive_outstanding)) {
         ControlMessage m = {.type = RNDIS_KEEPALIVE_MSG, .id = control_next_id(), .wanted = keepalive_wanted,
                             .done = keepalive_done, .context = h};
         m.length = rndis_build_keepalive(m.bytes, m.id);
         h->keepalive_outstanding = true;
         (void)control_send(h->control, &m, false);
     }
-    if (h->resetting && !h->reset_queued && now - h->last_reset_ms >= RESET_DRAIN_MS)
+    if (h->reset == RESET_DRAINING && now - h->last_reset_ms >= RESET_DRAIN_MS)
         h->failed("bulk OUT did not drain before RESET", kIOReturnSuccess);
 }

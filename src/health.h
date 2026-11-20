@@ -12,13 +12,22 @@
 #include "control.h"
 #include "datapath.h"
 
+/* Where a soft RESET stands. Traffic is held in every step but the first. */
+typedef enum {
+    RESET_IDLE,     /* no RESET under way: traffic flows */
+    RESET_DRAINING, /* waiting for the bulk OUT writes in flight */
+    RESET_SENT,     /* RESET_MSG is queued or awaits its completion */
+    RESET_FILTER,   /* the phone reset its addressing: the packet filter is being set again */
+} ResetStep;
+
 typedef struct {
     Control *control;
     Datapath *data;
     void (*failed)(const char *reason, IOReturn status);
     uint32_t packet_filter;
     uint64_t last_heard_ms, last_reset_ms;
-    bool keepalive_outstanding, resetting, reset_queued, stopped;
+    ResetStep reset;
+    bool keepalive_outstanding, stopped;
     unsigned keepalive_failures, resets;
 } Health;
 

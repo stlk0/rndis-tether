@@ -242,7 +242,7 @@ static void test_reset_during_batch_flush(void) {
     write_error = kIOReturnError;
     data.tx_errors_row = USB_ERROR_BURST / 2 - 1;
     datapath_send(&data, frame, sizeof frame); /* the full transfer fails to go out and asks for RESET */
-    CHECK(write_count == 1 && health.resetting && health.reset_queued && data.held && !data.filling);
+    CHECK(write_count == 1 && health.reset == RESET_SENT && data.held && !data.filling);
     CHECK(data.stats.tx_dropped == 2 && data.free_count == TX_SLOTS && !failed);
     CHECK(sent_count == 1 && sent[0].type == RNDIS_RESET_MSG);
 }
@@ -254,18 +254,18 @@ static void test_reset_filter_restore(void) {
     datapath_send(&data, frame, sizeof frame);
     datapath_flush(&data); /* one bulk OUT write in flight */
     health_reset(&health, "offline test");
-    CHECK(health.resetting && !health.reset_queued && health.resets == 1 && !sent_count && data.held);
+    CHECK(health.reset == RESET_DRAINING && health.resets == 1 && !sent_count && data.held);
     health_reset(&health, "the same RESET is still in progress");
     CHECK(health.resets == 1 && !failed);
     datapath_send(&data, frame, sizeof frame);
     CHECK(data.stats.tx_dropped == 1 && !data.filling); /* held: nothing new goes out */
     complete_write(kIOReturnSuccess);
-    CHECK(health.reset_queued && sent_count == 1 && sent[0].type == RNDIS_RESET_MSG);
+    CHECK(health.reset == RESET_SENT && sent_count == 1 && sent[0].type == RNDIS_RESET_MSG);
     reply(0, CONTROL_SUCCESS, 0, 1); /* the phone lost its addressing: restore the packet filter */
-    CHECK(health.resetting && sent_count == 2 && sent[1].type == RNDIS_SET_MSG);
+    CHECK(health.reset == RESET_FILTER && sent_count == 2 && sent[1].type == RNDIS_SET_MSG);
     CHECK(rndis_le32(sent[1].bytes + 12) == OID_GEN_CURRENT_PACKET_FILTER && rndis_le32(sent[1].bytes + 28) == 0x0b);
     reply(1, CONTROL_SUCCESS, 0, 0);
-    CHECK(!health.resetting && !data.held && !failed && health.resets == 1);
+    CHECK(health.reset == RESET_IDLE && !data.held && !failed && health.resets == 1);
 }
 
 static void test_keepalive(void) {
@@ -301,7 +301,7 @@ static void test_keepalive(void) {
     test_now += 5000;
     health_tick(&health);
     reply(0, CONTROL_DEVICE_STATUS, 1, 0); /* rejected: RESET */
-    CHECK(health.resetting && health.reset_queued && sent[1].type == RNDIS_RESET_MSG);
+    CHECK(health.reset == RESET_SENT && sent[1].type == RNDIS_RESET_MSG);
     reply(1, CONTROL_TIMEOUT, 0, 0);
     CHECK(failed == 1 && !strcmp(failed_reason, "soft RESET failed"));
 }
@@ -310,7 +310,7 @@ static void test_reset_limits(void) {
     fixture(23700, 15);
     health_reset(&health, "offline test");
     reply(0, CONTROL_SUCCESS, 0, 0);
-    CHECK(!health.resetting && !failed);
+    CHECK(health.reset == RESET_IDLE && !failed);
     test_now += 29999;
     health_reset(&health, "another need within 30 seconds");
     CHECK(failed == 1 && health.resets == 1);

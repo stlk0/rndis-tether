@@ -10,6 +10,9 @@
 #define RNDIS_CONTROL_CLASS    0xe0u
 #define RNDIS_CONTROL_SUBCLASS 0x01u
 #define RNDIS_CONTROL_PROTOCOL 0x03u
+#define MISC_CLASS             0xefu /* with the USB-IF codes for RNDIS over Ethernet */
+#define MISC_RNDIS_SUBCLASS    0x04u
+#define MISC_ETHERNET_PROTOCOL 0x01u
 #define CDC_CONTROL_CLASS      0x02u /* with the Android variant's subclass and protocol */
 #define CDC_ACM_SUBCLASS       0x02u
 #define VENDOR_PROTOCOL        0xffu
@@ -49,10 +52,11 @@ static CFMutableDictionaryRef create_interface_matching(const int32_t *values, u
 CFMutableDictionaryRef usb_create_matching(UsbMatching kind) {
     static const int32_t values[USB_MATCHING_KINDS][3] = {
         [USB_MATCH_RNDIS] = {RNDIS_CONTROL_CLASS, RNDIS_CONTROL_SUBCLASS, RNDIS_CONTROL_PROTOCOL},
+        [USB_MATCH_MISC] = {MISC_CLASS, MISC_RNDIS_SUBCLASS, MISC_ETHERNET_PROTOCOL},
         [USB_MATCH_CDC] = {CDC_CONTROL_CLASS, CDC_ACM_SUBCLASS, VENDOR_PROTOCOL},
     };
-    /* Any other kind matches RNDIS. */
-    unsigned row = kind == USB_MATCH_CDC ? USB_MATCH_CDC : USB_MATCH_RNDIS;
+    /* A kind outside the table matches e0/01/03. */
+    unsigned row = (unsigned)kind < USB_MATCHING_KINDS ? (unsigned)kind : USB_MATCH_RNDIS;
     return create_interface_matching(values[row], sizeof values[row] / sizeof values[row][0]);
 }
 
@@ -201,7 +205,7 @@ bool usb_rndis_candidate(io_service_t service, bool *cdc) {
     uint32_t cls = 0, number = 0;
     if (!property_u32(service, CFSTR(kUSBInterfaceClass), &cls)) return false;
     *cdc = cls == CDC_CONTROL_CLASS;
-    if (!*cdc) return cls == RNDIS_CONTROL_CLASS;
+    if (!*cdc) return cls == RNDIS_CONTROL_CLASS || cls == MISC_CLASS;
     UsbIface a = NULL;
     RndisCdcInfo info;
     bool ok = interface_number(service, &number) && !create_interface(service, &a) &&

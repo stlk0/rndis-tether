@@ -55,7 +55,7 @@ down: lower modules report upwards only through event structs (`ControlEvents`,
 | `src/status.c` | `name=value` status lines and the socket that serves them |
 | `src/admin.c` | The settings socket for administrators: `set <name> <value>`, caller checked by uid |
 | `src/runtime.c` | `/var/db/rndis-tether`: sockets prepared there and renamed into `/var/run`; the marker of our feth pair |
-| `src/usb.c` | The only IOKit USB code: matching (`e0/01/03`, `02/02/ff` minus CDC-ACM modems), open/close, transfers |
+| `src/usb.c` | The only IOKit USB code: matching (`e0/01/03`, `ef/04/01`, `02/02/ff` minus CDC-ACM modems), open/close, transfers |
 | `src/netif.c` | feth pair, BPF, `ipconfig set`, SCDynamicStore (lease, service rank, primary interface), subprocesses |
 | `src/rndis.c` | Pure RNDIS encoding and parsing, CDC descriptor walk. No I/O. |
 | `src/clock.c`, `src/log.c` | Monotonic time and run-loop timers; logging (unified log under launchd, stderr otherwise) |
@@ -132,6 +132,7 @@ Each of these was found the hard way on a real phone.
 Samsung Galaxy S25 on an Intel Mac with macOS 26: connecting, unplugging, sleep and
 wake, Wi-Fi on and off, VPN (Tailscale), settings changed live, sustained load.
 Connecting and browsing also checked on an Apple silicon Mac and with a OnePlus 7 Pro.
+The `ef/04/01` interface comes from a user's report of a working Xiaomi 14.
 Not yet tested: phones with the CDC-style `02/02/ff` interface, the phone's RESET and
 link up/down indications.
 

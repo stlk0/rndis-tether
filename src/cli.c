@@ -28,7 +28,9 @@
 #define COMMAND_LINK COMMAND_DIR "/rndis-tether"
 #define REASON_SIZE 400 /* a why text; also the admin reply it is cut from */
 #define PAUSE_DENIED_REASON "only administrators of this Mac can disconnect or connect the phone"
-#define STATUS_STATE_NOT_RUNNING "not-running" /* the CLI got no daemon reply */
+/* States only `status --raw` prints, for a daemon that sent no reply. */
+#define STATUS_STATE_NOT_RUNNING "not-running"
+#define STATUS_STATE_BUSY "busy"
 #define LOG_HINT "/usr/bin/log show --last 30m --style compact --predicate 'subsystem == \"" LABEL "\"'"
 /* launchd waits this long for the service to exit before it kills it (ExitTimeOut); the
  * limit is longer than SESSION_TEARDOWN_MAX_MS. A bootout or kickstart -k must be
@@ -85,16 +87,25 @@ static size_t read_reply(int fd, char *buf, size_t size) {
     return used;
 }
 
-/* The running daemon's state as "name=value" lines; text is empty when false is returned. */
-static bool status_query(char *text, size_t size) {
+typedef enum {
+    DAEMON_REPLIED,
+    DAEMON_BUSY,   /* it listens but did not answer in time: a bring-up or teardown holds its run loop */
+    DAEMON_ABSENT, /* nobody listens */
+} DaemonReply;
+
+/* The running daemon's state as "name=value" lines; text is empty unless it replied. */
+static DaemonReply status_query(char *text, size_t size) {
     int fd = connect_service(STATUS_SOCKET, STATUS_TIMEOUT_S);
     if (fd < 0) {
         text[0] = 0;
-        return false;
+        return DAEMON_ABSENT;
     }
+    errno = 0; /* a read that ends at the peer's close leaves it alone */
     size_t used = read_reply(fd, text, size);
+    bool timed_out = errno == EAGAIN; /* SO_RCVTIMEO ran out */
     close(fd);
-    return used > 0;
+    if (used) return DAEMON_REPLIED;
+    return timed_out ? DAEMON_BUSY : DAEMON_ABSENT;
 }
 
 typedef enum { SERVICE_APPLIED, SERVICE_REFUSED, SERVICE_ABSENT } ServiceAnswer;
@@ -295,11 +306,21 @@ static void print_not_running(void) {
                "  Its log:  " LOG_HINT "\n");
 }
 
+/* For a daemon that sent no reply. */
+static void print_no_reply(DaemonReply reply) {
+    if (reply == DAEMON_BUSY)
+        printf("The rndis-tether service is busy connecting to the phone or disconnecting from it.\n"
+               "  It answers again in a few seconds.\n");
+    else
+        print_not_running();
+}
+
 int cli_status(bool raw) {
     char text[STATUS_TEXT_SIZE];
-    if (!status_query(text, sizeof text)) {
-        if (raw) puts("state=" STATUS_STATE_NOT_RUNNING);
-        else print_not_running();
+    DaemonReply reply = status_query(text, sizeof text);
+    if (reply != DAEMON_REPLIED) {
+        if (raw) puts(reply == DAEMON_BUSY ? "state=" STATUS_STATE_BUSY : "state=" STATUS_STATE_NOT_RUNNING);
+        else print_no_reply(reply);
         return 1;
     }
     if (raw) fputs(text, stdout);
@@ -323,19 +344,22 @@ int cli_monitor(void) {
     uint64_t last_ns = 0;
     while (!interrupted) {
         char text[STATUS_TEXT_SIZE], time_text[16];
-        bool running = status_query(text, sizeof text);
+        DaemonReply reply = status_query(text, sizeof text);
         uint64_t now_ns = clock_gettime_nsec_np(CLOCK_MONOTONIC);
         double down = 0, up = 0;
-        unsigned long long rx = number(text, "rx-bytes");
-        unsigned long long tx = number(text, "tx-bytes");
-        if (last_ns && rx >= last_rx && tx >= last_tx) { /* counters restart with every session */
-            double seconds = (double)(now_ns - last_ns) / 1e9;
-            down = (double)(rx - last_rx) * 8 / seconds;
-            up = (double)(tx - last_tx) * 8 / seconds;
+        /* A busy service keeps its counters: the next speed spans the time without an answer. */
+        if (reply != DAEMON_BUSY) {
+            unsigned long long rx = number(text, "rx-bytes");
+            unsigned long long tx = number(text, "tx-bytes");
+            if (last_ns && rx >= last_rx && tx >= last_tx) { /* counters restart with every session */
+                double seconds = (double)(now_ns - last_ns) / 1e9;
+                down = (double)(rx - last_rx) * 8 / seconds;
+                up = (double)(tx - last_tx) * 8 / seconds;
+            }
+            last_rx = rx;
+            last_tx = tx;
+            last_ns = now_ns;
         }
-        last_rx = rx;
-        last_tx = tx;
-        last_ns = now_ns;
 
         time_t wall = time(NULL);
         struct tm local;
@@ -343,8 +367,8 @@ int cli_monitor(void) {
         strftime(time_text, sizeof time_text, "%H:%M:%S", &local);
         if (terminal) fputs(CLEAR_SCREEN, stdout);
         printf("rndis-tether monitor    %s    Ctrl-C to quit\n\n", time_text);
-        if (running) print_status(text, down, up);
-        else print_not_running();
+        if (reply == DAEMON_REPLIED) print_status(text, down, up);
+        else print_no_reply(reply);
         fflush(stdout);
         struct timespec second = {1, 0};
         nanosleep(&second, NULL); /* a signal ends it early */
@@ -356,8 +380,9 @@ int cli_monitor(void) {
 
 int cli_set_paused(bool paused) {
     char text[STATUS_TEXT_SIZE], paused_field[8], version[32], why[REASON_SIZE];
-    if (!status_query(text, sizeof text)) {
-        print_not_running();
+    DaemonReply reply = status_query(text, sizeof text);
+    if (reply != DAEMON_REPLIED) {
+        print_no_reply(reply);
         return 1;
     }
     /* 1.0.x has no paused field and would answer with advice about restarting. */
@@ -397,7 +422,7 @@ static bool service_loaded(void) {
 static bool wait_for_daemon(void) {
     for (unsigned i = 0; i < DAEMON_START_WAIT_S * 1000 / POLL_INTERVAL_MS; ++i) {
         char text[64];
-        if (status_query(text, sizeof text)) return true;
+        if (status_query(text, sizeof text) == DAEMON_REPLIED) return true;
         usleep(POLL_INTERVAL_MS * 1000);
     }
     return false;
